@@ -1,6 +1,6 @@
 {
   "name": "sonrisas",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "description": "Sonrisas — control diario de guardería (asistencia, alimentación, actividades y reporte a familias por WhatsApp). Backend NestJS + frontend React en un solo proyecto.",
   "private": true,
   "engines": {

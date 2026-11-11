@@ -4,11 +4,16 @@
 #
 #   curl -fsSL https://raw.githubusercontent.com/vichedev/Control_Sonrisas/main/install.sh | sudo bash
 #
+# INSTALACIÓN RÁPIDA (por defecto) — pensada para Nginx Proxy Manager:
+#   sólo pregunta el correo y la contraseña de dirección y el dominio que tienes en NPM
+#   (p. ej. sonrisitas.maat.ec). Publica la app en el puerto 8986 (docker 8986:3000) para que
+#   NPM la reenvíe con HTTPS: Destination = http://IP-DEL-SERVIDOR:8986.
+#   Todo lo demás va por defecto (Sonrisitas, America/Guayaquil, respaldos cifrados…).
+#   Cuestionario completo (Caddy, otros puertos…): SONRISAS_ADVANCED=1
+#
 # Qué hace: instala Docker si falta, descarga el proyecto en /opt/sonrisas (última versión
-# publicada), pregunta los datos básicos —usuario y CONTRASEÑA de dirección, nombre del
-# centro, modo de acceso (puerto 8986 o HTTPS con dominio)…—, genera secretos fuertes,
-# escribe .env.production (permisos 600), abre los puertos en ufw si está activo, construye
-# y arranca todo, crea la cuenta de dirección y muestra un resumen.
+# publicada), genera secretos fuertes, escribe .env.production (permisos 600), abre el puerto
+# en ufw si está activo, construye y arranca todo, crea la cuenta de dirección y muestra un resumen.
 #
 # La contraseña de dirección NUNCA se guarda en disco: se entrega al contenedor por la
 # entrada estándar al crear la cuenta.
@@ -231,6 +236,36 @@ fi
 if [ "$write_env" = "1" ]; then
   OLD_ENV=""
   [ -f "$ENV_FILE" ] && OLD_ENV="$ENV_FILE"
+  default_ip="$(curl -fsS --max-time 5 https://api.ipify.org 2>/dev/null || hostname -I 2>/dev/null | awk '{print $1}' || true)"
+  PUBLIC_HOST="${PUBLIC_HOST:-${SITE_ADDRESS:-}}"
+
+  if [ "${SONRISAS_ADVANCED:-0}" != "1" ]; then
+  # ---------------------------------------------------------- instalación EXPRESS
+  # Pensada para Nginx Proxy Manager (u otro proxy con HTTPS) que reenvía a http://IP:8986.
+  # Sólo se pregunta lo imprescindible; el resto va por defecto.
+  echo
+  echo -e "${B}Instalación rápida${N} (Enter = valor por defecto)"
+  echo
+  ask ADMIN_EMAIL "Usuario de dirección (correo)" "" "$EMAIL_RE" "Correo inválido (ej. direccion@sonrisitas.com)."
+  ask_password
+  DOMAIN_RE='^(([A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+[A-Za-z]{2,63})$'
+  ask PUBLIC_DOMAIN "Dominio configurado en tu Nginx Proxy Manager" "${PUBLIC_DOMAIN:-sonrisitas.maat.ec}" "$DOMAIN_RE" "Escribe sólo el dominio (ej. sonrisitas.maat.ec), sin https:// ni /."
+  ADMIN_NAME="${ADMIN_NAME:-Dirección}"
+  COMPANY_NAME="${COMPANY_NAME:-Sonrisitas}"
+  COMPANY_TAGLINE="${COMPANY_TAGLINE:-Centro de Desarrollo Infantil}"
+  TZ_VALUE="${TZ_VALUE:-America/Guayaquil}"
+  WHATSAPP_COUNTRY_CODE="${WHATSAPP_COUNTRY_CODE:-593}"
+  PUBLIC_MODE=http
+  APP_PORT="${APP_PORT:-8986}"
+  # El proxy llega por la IP del servidor: el puerto queda abierto a la red.
+  APP_BIND=0.0.0.0
+  PUBLIC_HOST="$PUBLIC_DOMAIN"
+  SITE_ADDRESS="$PUBLIC_DOMAIN"
+  FRONTEND="https://$PUBLIC_DOMAIN"
+  TRUST_PROXY=true
+  BACKUP_ENCRYPT="${BACKUP_ENCRYPT:-1}"
+  else
+  # ---------------------------------------------------------- instalación AVANZADA
   echo
   echo -e "${B}Configuración inicial${N} (Enter = valor por defecto)"
   echo
@@ -254,8 +289,6 @@ if [ "$write_env" = "1" ]; then
   echo "   2) HTTPS con dominio: Caddy + certificado Let's Encrypt automático en 80/443."
   case "${PUBLIC_MODE:-}" in http) MODE_CHOICE=1 ;; https) MODE_CHOICE=2 ;; esac
   ask MODE_CHOICE "Modo de acceso (1 o 2)" "1" '^[12]$' "Responde 1 o 2."
-  default_ip="$(curl -fsS --max-time 5 https://api.ipify.org 2>/dev/null || hostname -I 2>/dev/null | awk '{print $1}' || true)"
-  PUBLIC_HOST="${PUBLIC_HOST:-${SITE_ADDRESS:-}}"
 
   if [ "$MODE_CHOICE" = "1" ]; then
     PUBLIC_MODE=http
@@ -298,6 +331,7 @@ if [ "$write_env" = "1" ]; then
   echo
   echo -e "${B}4. Respaldos${N}"
   ask BACKUP_ENCRYPT "¿Cifrar los respaldos? (recomendado; 1 = sí, 0 = no)" "1" '^[01]$' "Responde 1 o 0."
+  fi # fin instalación avanzada
 
   # Secretos: se conservan los del archivo anterior (la BD ya se creó con esa clave).
   DB_USER_V="$( [ -n "$OLD_ENV" ] && env_val DB_USERNAME "$OLD_ENV" || true)"; DB_USER_V="${DB_USER_V:-sonrisas}"
@@ -413,7 +447,7 @@ admin_email="$(env_val ADMIN_EMAIL "$ENV_FILE")"
 lan_ip="$(hostname -I 2>/dev/null | awk '{print $1}' || true)"
 echo
 echo -e "${B}============================================================${N}"
-echo -e "${B} Sonrisas instalado${N}"
+echo -e "${B} Sonrisitas instalado${N}"
 echo -e "${B}============================================================${N}"
 echo -e " Dirección web:   ${B}$URL_V${N}"
 if [ "$MODE" = "http" ] && [ -n "$lan_ip" ] && [ "$BIND_V" != "127.0.0.1" ]; then
@@ -421,6 +455,19 @@ if [ "$MODE" = "http" ] && [ -n "$lan_ip" ] && [ "$BIND_V" != "127.0.0.1" ]; the
 fi
 echo " Usuario:         $admin_email   (la contraseña es la que escribiste; no se guarda)"
 echo "                  Al entrar, activa la verificación en dos pasos (Seguridad)."
+TRUST_V="$(env_val TRUST_PROXY "$ENV_FILE")"
+if [ "$MODE" = "http" ] && [ "$TRUST_V" = "true" ] && [[ "$URL_V" == https://* ]]; then
+  srv_ip="$(curl -fsS --max-time 5 https://api.ipify.org 2>/dev/null || echo "$lan_ip")"
+  echo
+  echo -e " ${B}Nginx Proxy Manager${N} (Proxy Host para ${URL_V#https://}):"
+  echo "   Scheme: http   ·   Forward Hostname/IP: ${srv_ip:-IP-DEL-SERVIDOR}   ·   Forward Port: $PORT_V"
+  echo "   Activa: Websockets Support y Block Common Exploits"
+  echo "   SSL: Let's Encrypt + Force SSL + HTTP/2"
+  echo "   Advanced (opcional, recomendado para el tiempo real y las fotos):"
+  echo "     proxy_buffering off;  proxy_read_timeout 3600s;  client_max_body_size 50m;"
+  echo -e " ${Y}Seguridad:${N} el puerto $PORT_V queda abierto. Si NPM está en OTRO servidor, limita"
+  echo "   en tu proveedor/firewall el acceso a $PORT_V sólo a la IP de NPM (ver DEPLOY.md)."
+fi
 if [[ "$URL_V" == http://* ]]; then
   echo -e " ${Y}Sin HTTPS:${N}       la cámara y la instalación como app necesitan HTTPS."
   echo "                  Pon un proxy con certificado delante (DEPLOY.md → Proxy propio)."

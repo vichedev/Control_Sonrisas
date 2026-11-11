@@ -1,6 +1,41 @@
-# Despliegue — Sonrisas (Docker)
+# Despliegue — Sonrisitas (Docker)
 
-Guía para instalar, actualizar, volver atrás y respaldar Sonrisas en un servidor **Ubuntu/Debian** con Docker.
+Guía para instalar, actualizar, volver atrás y respaldar el sistema en un servidor **Ubuntu/Debian** con Docker.
+
+## Instalación rápida con Nginx Proxy Manager (recomendada)
+
+1. En el servidor, como root:
+
+   ```bash
+   curl -fsSL https://raw.githubusercontent.com/vichedev/Control_Sonrisas/main/install.sh | sudo bash
+   ```
+
+   Sólo pregunta **el correo y la contraseña de dirección** y **el dominio** que tienes en NPM
+   (Enter = `sonrisitas.maat.ec`). Instala Docker si falta, genera las claves, levanta todo en el
+   puerto **8986** (`8986:3000`) y crea la cuenta de dirección. La contraseña no se guarda en disco.
+
+2. En **Nginx Proxy Manager → Proxy Hosts → Add Proxy Host**:
+
+   | Campo | Valor |
+   |---|---|
+   | Domain Names | `sonrisitas.maat.ec` |
+   | Scheme | `http` |
+   | Forward Hostname / IP | IP del servidor (p. ej. `205.235.2.135`) |
+   | Forward Port | `8986` |
+   | Opciones | Websockets Support · Block Common Exploits |
+   | SSL | Let's Encrypt · Force SSL · HTTP/2 |
+   | Advanced (recomendado) | `proxy_buffering off;  proxy_read_timeout 3600s;  client_max_body_size 50m;` |
+
+   El "Advanced" evita que NPM retenga el canal de tiempo real y permite subir fotos grandes.
+
+3. Abre `https://sonrisitas.maat.ec` y entra con el correo y la contraseña que escribiste.
+
+> **Seguridad:** el puerto 8986 queda abierto (Docker se salta ufw). Si NPM está en **otro**
+> servidor, limita en el firewall de tu proveedor el acceso al 8986 sólo desde la IP de NPM.
+> Si NPM está en este mismo servidor, ver §1.3 para dejarlo sólo en local.
+>
+> Cambiar la contraseña de dirección más adelante: `cd /opt/sonrisas && sudo ./deploy.sh admin`.
+> Cuestionario completo (Caddy con Let's Encrypt propio, otros puertos…): `SONRISAS_ADVANCED=1`.
 
 ```text
 api      →  NestJS: API /api/* + la web. Publica el puerto 8986 (→ 3000). Aplica migraciones al arrancar
