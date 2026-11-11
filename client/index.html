@@ -18,7 +18,8 @@
        · frame-ancestors 'none': impide cargar la app dentro de un iframe externo (anti-clickjacking).
                                  Nota: en <meta> algunos navegadores lo ignoran — el header
                                  X-Frame-Options de Helmet cubre el caso.
-       · upgrade-insecure-requests : fuerza https en cualquier subrecurso http:// olvidado.
+       · upgrade-insecure-requests NO va aquí: rompería el modo "puerto directo" por HTTP
+                                 (http://IP:8986). Con HTTPS lo añade la cabecera CSP del backend.
     -->
     <meta http-equiv="Content-Security-Policy" content="
       default-src 'self';
@@ -33,7 +34,6 @@
       base-uri 'self';
       form-action 'self';
       frame-ancestors 'none';
-      upgrade-insecure-requests
     " />
     <!-- Favicon dinámico: el backend devuelve el logo del centro si lo hay, o el por defecto.
          La primera petición HTML ya trae el icono correcto, sin "flash" del icono genérico. -->

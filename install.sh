@@ -4,19 +4,32 @@
 #
 #   curl -fsSL https://raw.githubusercontent.com/vichedev/Control_Sonrisas/main/install.sh | sudo bash
 #
-# Qué hace: instala Docker si falta, clona el proyecto en /opt/sonrisas, pregunta los
-# datos básicos (dominio o IP, cuenta de dirección, zona horaria…), genera secretos
-# fuertes, escribe .env.production (permisos 600), abre 80/443 en ufw si está activo,
-# construye y arranca todo, crea la cuenta de dirección y muestra un resumen.
+# Qué hace: instala Docker si falta, descarga el proyecto en /opt/sonrisas (última versión
+# publicada), pregunta los datos básicos —usuario y CONTRASEÑA de dirección, nombre del
+# centro, modo de acceso (puerto 8986 o HTTPS con dominio)…—, genera secretos fuertes,
+# escribe .env.production (permisos 600), abre los puertos en ufw si está activo, construye
+# y arranca todo, crea la cuenta de dirección y muestra un resumen.
 #
-# Volver a ejecutarlo es seguro: NUNCA sobrescribe .env.production ni toca los
-# volúmenes de datos. Para cambiar de versión usa ./deploy.sh update.
+# La contraseña de dirección NUNCA se guarda en disco: se entrega al contenedor por la
+# entrada estándar al crear la cuenta.
+#
+# Modos de acceso:
+#   1) Puerto directo (por defecto): http://IP-o-dominio:8986  (docker 8986:3000, sin Caddy)
+#   2) HTTPS con dominio: Caddy + Let's Encrypt en 80/443
+#
+# Volver a ejecutarlo es seguro: no toca los volúmenes de datos y .env.production sólo se
+# reescribe si eliges "reconfigurar" (conservando las claves de la BD, JWT y respaldos).
+# Para cambiar de versión usa ./deploy.sh update.
 #
 # Sin preguntas (variables de entorno):
-#   SONRISAS_NONINTERACTIVE=1 SITE_ADDRESS=asistencia.midominio.com \
-#   ADMIN_EMAIL=direccion@midominio.com ADMIN_NAME="Dirección" TZ=America/Guayaquil \
-#   WHATSAPP_COUNTRY_CODE=593 COMPANY_NAME="Sonrisas" BACKUP_ENCRYPT=1 bash install.sh
-# Otras: SONRISAS_DIR (/opt/sonrisas), SONRISAS_REPO, SONRISAS_REF (tag o rama).
+#   SONRISAS_NONINTERACTIVE=1 PUBLIC_MODE=http PUBLIC_HOST=203.0.113.10 APP_PORT=8986 \
+#   ADMIN_EMAIL=direccion@midominio.com ADMIN_PASSWORD='UnaClaveLarga2026' \
+#   ADMIN_NAME="Dirección" COMPANY_NAME="Sonrisitas" COMPANY_TAGLINE="Centro de Desarrollo Infantil" \
+#   TZ=America/Guayaquil WHATSAPP_COUNTRY_CODE=593 BACKUP_ENCRYPT=1 bash install.sh
+# Modo HTTPS: PUBLIC_MODE=https PUBLIC_HOST=asistencia.midominio.com [EXPOSE_APP_PORT=1]
+# Proxy propio con TLS delante (modo http): BEHIND_PROXY=1 PUBLIC_URL=https://asistencia.midominio.com
+# Otras: SONRISAS_DIR (/opt/sonrisas), SONRISAS_REPO, SONRISAS_REF (tag o rama),
+#        KEEP_ENV=1|0 (si ya existe .env.production; por defecto se conserva).
 # ============================================================
 set -Eeuo pipefail
 
@@ -41,6 +54,7 @@ ask() { # variable "pregunta" "por defecto" regex "mensaje de error"
   fi
   if [ "$INTERACTIVE" = "0" ]; then
     [ -n "$def" ] || die "Falta $__var (modo sin preguntas)."
+    [[ "$def" =~ $re ]] || die "$__var inválido: $msg"
     printf -v "$__var" '%s' "$def"; return
   fi
   while true; do
@@ -51,10 +65,59 @@ ask() { # variable "pregunta" "por defecto" regex "mensaje de error"
   done
 }
 
+yesno() { # variable "pregunta" defecto(s|n) → deja 1/0 en la variable
+  local __var="$1" q="$2" def="$3" val="${!1:-}" a hint
+  case "$val" in 1|s|S|y|Y|si|sí|yes) printf -v "$__var" 1; return ;; 0|n|N|no) printf -v "$__var" 0; return ;; esac
+  if [ "$INTERACTIVE" = "0" ]; then
+    [ "$def" = "s" ] && printf -v "$__var" 1 || printf -v "$__var" 0; return
+  fi
+  [ "$def" = "s" ] && hint="[S/n]" || hint="[s/N]"
+  read -r -p "$q $hint " a </dev/tty || a=""
+  a="${a:-$def}"
+  [[ "$a" =~ ^[sSyY] ]] && printf -v "$__var" 1 || printf -v "$__var" 0
+}
+
+# Misma política que la app (src/common/password.validator.ts). Devuelve el motivo o "".
+password_problem() {
+  local pw="$1" lower
+  [ "${#pw}" -ge 10 ] || { echo "debe tener al menos 10 caracteres"; return; }
+  [ "${#pw}" -le 128 ] || { echo "no puede superar los 128 caracteres"; return; }
+  [[ "$pw" =~ [A-Za-zÁÉÍÓÚáéíóúÑñ] ]] || { echo "debe incluir al menos una letra"; return; }
+  [[ "$pw" =~ [0-9] ]] || { echo "debe incluir al menos un número"; return; }
+  [[ "$pw" =~ ^(.)\1+$ ]] && { echo "no puede ser el mismo carácter repetido"; return; }
+  lower="$(printf '%s' "$pw" | tr '[:upper:]' '[:lower:]')"
+  case "$lower" in
+    password1|password123|contrasena1|contrasena123|contraseña1|admin12345|administrador1|qwerty12345|asdf12345|1234567890|abcd123456|facetowork1|facetowork123|usuario123|trabajador1)
+      echo "es demasiado común"; return ;;
+  esac
+  [[ "$lower" =~ ^(0123456789|abcdefghij|qwertyuiop) ]] && { echo "es demasiado predecible"; return; }
+  echo ""
+}
+
+ask_password() { # → ADMIN_PW
+  local p1 p2 why
+  if [ -n "${ADMIN_PASSWORD:-}" ]; then
+    why="$(password_problem "$ADMIN_PASSWORD")"
+    [ -z "$why" ] || die "ADMIN_PASSWORD inválida: $why."
+    ADMIN_PW="$ADMIN_PASSWORD"; return
+  fi
+  [ "$INTERACTIVE" = "1" ] || die "Falta ADMIN_PASSWORD (modo sin preguntas)."
+  echo "  La contraseña debe tener mínimo 10 caracteres, con al menos una letra y un número"
+  echo "  (no se muestra al escribirla y no se guarda en ningún archivo)."
+  while true; do
+    read -r -s -p "Contraseña de la cuenta de dirección: " p1 </dev/tty || true; echo >/dev/tty
+    why="$(password_problem "$p1")"
+    if [ -n "$why" ]; then echo "  La contraseña $why. Prueba otra."; continue; fi
+    read -r -s -p "Repite la contraseña: " p2 </dev/tty || true; echo >/dev/tty
+    if [ "$p1" != "$p2" ]; then echo "  No coinciden. Vuelve a intentarlo."; continue; fi
+    ADMIN_PW="$p1"; return
+  done
+}
+
 rand_hex() { openssl rand -hex "$1"; }
-rand_pw() { # contraseña legible: letras y números, con al menos uno de cada
-  local p; p="$(openssl rand -base64 30 | tr -dc 'A-HJ-NP-Za-km-z2-9' | cut -c1-14 || true)"
-  printf '%s' "${p}7k"
+env_val() { # clave archivo → valor (sin ejecutar el archivo)
+  local v; v="$(grep -E "^$1=" "$2" 2>/dev/null | tail -n1 | cut -d= -f2- || true)"
+  v="${v%$'\r'}"; printf '%s' "$v"
 }
 
 # ------------------------------------------------------------ comprobaciones
@@ -86,10 +149,18 @@ docker compose version >/dev/null 2>&1 || die "Falta el plugin 'docker compose' 
 log "Docker $(docker version -f '{{.Server.Version}}' 2>/dev/null || echo '?')"
 
 # ------------------------------------------------------------ código
+latest_tag() { git -C "$DIR" tag -l 'v*' --sort=-v:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -n1 || true; }
 if [ -d "$DIR/.git" ]; then
-  log "El proyecto ya está en $DIR (no cambio de versión; usa ./deploy.sh update)"
   git config --global --add safe.directory "$DIR" 2>/dev/null || true
-  git -C "$DIR" fetch --quiet --tags origin || warn "No pude actualizar la lista de versiones"
+  git -C "$DIR" fetch --quiet --tags --force origin || warn "No pude actualizar la lista de versiones"
+  if [ -s "$DIR/ops/state/current.env" ]; then
+    log "El proyecto ya está instalado en $DIR (no cambio de versión; usa ./deploy.sh update)"
+  else
+    ref="${REF:-$(latest_tag)}"
+    if [ -n "$ref" ]; then
+      git -C "$DIR" -c advice.detachedHead=false checkout -q "$ref" && log "Versión: $ref"
+    fi
+  fi
 elif [ -d "$DIR" ] && [ -n "$(ls -A "$DIR" 2>/dev/null)" ]; then
   # Instalación anterior copiada a mano (rsync), sin git: se convierte en repositorio
   # conservando .env.production y los datos (que viven en volúmenes de Docker).
@@ -103,7 +174,7 @@ elif [ -d "$DIR" ] && [ -n "$(ls -A "$DIR" 2>/dev/null)" ]; then
   git -C "$DIR" init -q
   git -C "$DIR" remote add origin "$REPO_URL" 2>/dev/null || git -C "$DIR" remote set-url origin "$REPO_URL"
   git -C "$DIR" fetch --quiet --tags origin
-  ref="${REF:-$(git -C "$DIR" tag -l 'v*' --sort=-v:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -n1 || true)}"
+  ref="${REF:-$(latest_tag)}"
   ref="${ref:-origin/main}"
   git -C "$DIR" -c advice.detachedHead=false checkout -q -f "$ref"
   log "Convertida a git en $ref (copia del estado anterior: ${DIR}.bak-*)"
@@ -111,7 +182,7 @@ else
   log "Descargando el proyecto en $DIR…"
   git clone --quiet "$REPO_URL" "$DIR"
   git config --global --add safe.directory "$DIR" 2>/dev/null || true
-  ref="${REF:-$(git -C "$DIR" tag -l 'v*' --sort=-v:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -n1 || true)}"
+  ref="${REF:-$(latest_tag)}"
   if [ -n "$ref" ]; then
     git -C "$DIR" -c advice.detachedHead=false checkout -q "$ref"
     log "Versión: $ref"
@@ -124,59 +195,156 @@ chmod +x deploy.sh install.sh scripts/*.sh 2>/dev/null || true
 
 # ------------------------------------------------------------ configuración
 ENV_FILE="$DIR/.env.production"
-GENERATED_ADMIN_PW=""
 GENERATED_BACKUP_KEY=""
+ADMIN_PW=""
+EMAIL_RE='^[^@[:space:]]+@[^@[:space:]]+\.[^@[:space:]]+$'
+TEXT_RE='^[^=#$"`\\]{2,60}$'
+LONG_TEXT_RE='^[^=#$"`\\]{2,120}$'
+HOST_RE='^(([A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+[A-Za-z]{2,63}|([0-9]{1,3}\.){3}[0-9]{1,3}|localhost)$'
+PORT_RE='^([1-9][0-9]{0,3}|[1-5][0-9]{4}|6[0-4][0-9]{3}|65[0-4][0-9]{2}|655[0-2][0-9]|6553[0-5])$'
+
+write_env=1
 if [ -f "$ENV_FILE" ]; then
-  log ".env.production ya existe: se conserva tal cual."
-else
+  echo
+  log ".env.production ya existe."
+  KEEP_ENV="${KEEP_ENV:-}"
+  yesno KEEP_ENV "¿Conservarlo tal cual? (No = reconfigurar; se conservan las claves de la BD, JWT, respaldos y VAPID)" s
+  if [ "$KEEP_ENV" = "1" ]; then
+    write_env=0
+    log "Se conserva .env.production."
+    SET_ADMIN="${SET_ADMIN:-}"
+    [ -n "${ADMIN_PASSWORD:-}" ] && SET_ADMIN=1
+    [ "$INTERACTIVE" = "0" ] && [ -z "$SET_ADMIN" ] && SET_ADMIN=0
+    yesno SET_ADMIN "¿Fijar ahora el usuario y la contraseña de la cuenta de dirección?" s
+    if [ "$SET_ADMIN" = "1" ]; then
+      ADMIN_EMAIL="${ADMIN_EMAIL:-}"
+      [ -n "$ADMIN_EMAIL" ] || ADMIN_EMAIL_DEF="$(env_val ADMIN_EMAIL "$ENV_FILE")"
+      ask ADMIN_EMAIL "Usuario (correo) de la cuenta de dirección" "${ADMIN_EMAIL_DEF:-}" "$EMAIL_RE" "Correo inválido (ej. direccion@sonrisitas.com)."
+      ask_password
+    fi
+  else
+    cp -p "$ENV_FILE" "$ENV_FILE.bak-$(date +%Y%m%d-%H%M%S)"
+    log "Copia del anterior: $ENV_FILE.bak-*"
+  fi
+fi
+
+if [ "$write_env" = "1" ]; then
+  OLD_ENV=""
+  [ -f "$ENV_FILE" ] && OLD_ENV="$ENV_FILE"
   echo
   echo -e "${B}Configuración inicial${N} (Enter = valor por defecto)"
-  default_ip="$(curl -fsS --max-time 5 https://api.ipify.org 2>/dev/null || hostname -I 2>/dev/null | awk '{print $1}')"
-  DOMAIN_RE='^(([A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+[A-Za-z]{2,63}|([0-9]{1,3}\.){3}[0-9]{1,3})$'
-  ask SITE_ADDRESS "Dominio del sistema (o IP del servidor si aún no tienes dominio)" "${default_ip:-}" "$DOMAIN_RE" \
-    "Escribe un dominio (asistencia.midominio.com) o una IPv4."
-  ask ADMIN_EMAIL "Correo de la cuenta de dirección" "" '^[^@[:space:]]+@[^@[:space:]]+\.[^@[:space:]]+$' "Correo inválido."
-  ask ADMIN_NAME "Nombre de la cuenta de dirección" "Dirección" '^[^=]{2,60}$' "Entre 2 y 60 caracteres."
-  ask COMPANY_NAME "Nombre del centro" "Sonrisas" '^[^=]{2,60}$' "Entre 2 y 60 caracteres."
+  echo
+  echo -e "${B}1. Cuenta de dirección${N} (administrador del sistema)"
+  ask ADMIN_EMAIL "Usuario (correo)" "" "$EMAIL_RE" "Correo inválido (ej. direccion@sonrisitas.com)."
+  ask_password
+  ask ADMIN_NAME "Nombre que se mostrará" "Dirección" "$TEXT_RE" "Entre 2 y 60 caracteres (sin = # \$ \" \`)."
+
+  echo
+  echo -e "${B}2. Centro${N}"
+  ask COMPANY_NAME "Nombre del centro" "Sonrisitas" "$TEXT_RE" "Entre 2 y 60 caracteres (sin = # \$ \" \`)."
+  ask COMPANY_TAGLINE "Lema / descripción" "Centro de Desarrollo Infantil" "$LONG_TEXT_RE" "Entre 2 y 120 caracteres (sin = # \$ \" \`)."
   ask TZ_VALUE "Zona horaria" "${TZ:-America/Guayaquil}" '^[A-Za-z_]+(/[A-Za-z0-9_+-]+)*$' "Formato Región/Ciudad."
   [ -f "/usr/share/zoneinfo/$TZ_VALUE" ] || warn "No encuentro la zona horaria $TZ_VALUE en este servidor (se usará igual en los contenedores)."
   ask WHATSAPP_COUNTRY_CODE "Código de país para WhatsApp" "593" '^[0-9]{1,4}$' "Sólo dígitos (Ecuador: 593)."
-  ask BACKUP_ENCRYPT "¿Cifrar los respaldos? (recomendado; 1 = sí, 0 = no)" "1" '^[01]$' "Responde 1 o 0."
 
-  if [[ "$SITE_ADDRESS" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; then
-    warn "Con una IP el certificado HTTPS es auto-firmado (el navegador avisará). Con un dominio es automático (Let's Encrypt)."
+  echo
+  echo -e "${B}3. Acceso${N}"
+  echo "   1) Puerto directo (recomendado para empezar): http://IP-o-dominio:8986"
+  echo "      Docker publica 8986 → 3000. Sin certificado (HTTP)."
+  echo "   2) HTTPS con dominio: Caddy + certificado Let's Encrypt automático en 80/443."
+  case "${PUBLIC_MODE:-}" in http) MODE_CHOICE=1 ;; https) MODE_CHOICE=2 ;; esac
+  ask MODE_CHOICE "Modo de acceso (1 o 2)" "1" '^[12]$' "Responde 1 o 2."
+  default_ip="$(curl -fsS --max-time 5 https://api.ipify.org 2>/dev/null || hostname -I 2>/dev/null | awk '{print $1}' || true)"
+  PUBLIC_HOST="${PUBLIC_HOST:-${SITE_ADDRESS:-}}"
+
+  if [ "$MODE_CHOICE" = "1" ]; then
+    PUBLIC_MODE=http
+    ask PUBLIC_HOST "IP pública o dominio del servidor" "${default_ip:-}" "$HOST_RE" "Escribe una IPv4 (203.0.113.10) o un dominio (asistencia.midominio.com)."
+    ask APP_PORT "Puerto" "8986" "$PORT_RE" "Puerto entre 1 y 65535."
+    echo
+    warn "En HTTP (sin certificado) el navegador NO permite usar la cámara (registro con foto)"
+    warn "ni instalar la app (PWA), salvo en http://localhost. Para usarlas, pon delante un proxy"
+    warn "con HTTPS (tu Nginx/Caddy/Cloudflare, ver DEPLOY.md) o reinstala eligiendo el modo 2."
+    BEHIND_PROXY="${BEHIND_PROXY:-}"
+    [ -n "${PUBLIC_URL:-}" ] && BEHIND_PROXY=1
+    yesno BEHIND_PROXY "¿Ya tienes (o vas a poner) un proxy propio con HTTPS delante?" n
+    if [ "$BEHIND_PROXY" = "1" ]; then
+      ask PUBLIC_URL "Dirección pública HTTPS (la que escribirán en el navegador)" "https://$PUBLIC_HOST" '^https://[A-Za-z0-9.-]+(:[0-9]{1,5})?$' "Formato https://dominio (sin / final)."
+      PROXY_LOCAL="${PROXY_LOCAL:-}"
+      yesno PROXY_LOCAL "¿El proxy está en ESTE servidor? (el puerto $APP_PORT quedará sólo en 127.0.0.1)" s
+      [ "$PROXY_LOCAL" = "1" ] && APP_BIND=127.0.0.1 || APP_BIND=0.0.0.0
+      FRONTEND="$PUBLIC_URL"; TRUST_PROXY=true
+    else
+      APP_BIND=0.0.0.0
+      FRONTEND="http://$PUBLIC_HOST:$APP_PORT"; TRUST_PROXY=false
+    fi
+    SITE_ADDRESS="$PUBLIC_HOST"
   else
-    warn "El dominio $SITE_ADDRESS debe apuntar (registro A) a la IP de este servidor ANTES de continuar."
+    PUBLIC_MODE=https
+    ask PUBLIC_HOST "Dominio del sistema (o IP si aún no tienes dominio)" "${default_ip:-}" "$HOST_RE" "Escribe un dominio (asistencia.midominio.com) o una IPv4."
+    if [[ "$PUBLIC_HOST" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; then
+      warn "Con una IP el certificado HTTPS es auto-firmado (el navegador avisará). Con un dominio es automático (Let's Encrypt)."
+    else
+      warn "El dominio $PUBLIC_HOST debe apuntar (registro A) a la IP de este servidor y los puertos 80/443 deben estar libres."
+    fi
+    ask APP_PORT "Puerto interno de la app" "8986" "$PORT_RE" "Puerto entre 1 y 65535."
+    EXPOSE_APP_PORT="${EXPOSE_APP_PORT:-}"
+    yesno EXPOSE_APP_PORT "¿Exponer TAMBIÉN el puerto $APP_PORT (HTTP directo, sin cifrar) a la red?" n
+    [ "$EXPOSE_APP_PORT" = "1" ] && APP_BIND=0.0.0.0 || APP_BIND=127.0.0.1
+    SITE_ADDRESS="$PUBLIC_HOST"
+    FRONTEND="https://$PUBLIC_HOST"; TRUST_PROXY=true
   fi
 
-  GENERATED_ADMIN_PW="${ADMIN_PASSWORD:-$(rand_pw)}"
-  [ "$BACKUP_ENCRYPT" = "1" ] && GENERATED_BACKUP_KEY="$(rand_hex 32)"
+  echo
+  echo -e "${B}4. Respaldos${N}"
+  ask BACKUP_ENCRYPT "¿Cifrar los respaldos? (recomendado; 1 = sí, 0 = no)" "1" '^[01]$' "Responde 1 o 0."
+
+  # Secretos: se conservan los del archivo anterior (la BD ya se creó con esa clave).
+  DB_USER_V="$( [ -n "$OLD_ENV" ] && env_val DB_USERNAME "$OLD_ENV" || true)"; DB_USER_V="${DB_USER_V:-sonrisas}"
+  DB_NAME_V="$( [ -n "$OLD_ENV" ] && env_val DB_NAME "$OLD_ENV" || true)"; DB_NAME_V="${DB_NAME_V:-sonrisas}"
+  DB_PASS_V="$( [ -n "$OLD_ENV" ] && env_val DB_PASSWORD "$OLD_ENV" || true)"; DB_PASS_V="${DB_PASS_V:-$(rand_hex 24)}"
+  JWT_V="$( [ -n "$OLD_ENV" ] && env_val JWT_SECRET "$OLD_ENV" || true)"; JWT_V="${JWT_V:-$(rand_hex 48)}"
+  VAPID_PUB_V="$( [ -n "$OLD_ENV" ] && env_val VAPID_PUBLIC_KEY "$OLD_ENV" || true)"
+  VAPID_PRIV_V="$( [ -n "$OLD_ENV" ] && env_val VAPID_PRIVATE_KEY "$OLD_ENV" || true)"
+  BKEY_V="$( [ -n "$OLD_ENV" ] && env_val BACKUP_ENCRYPTION_KEY "$OLD_ENV" || true)"
+  if [ "$BACKUP_ENCRYPT" = "1" ] && [ -z "$BKEY_V" ]; then GENERATED_BACKUP_KEY="$(rand_hex 32)"; BKEY_V="$GENERATED_BACKUP_KEY"; fi
+  [ "$BACKUP_ENCRYPT" = "0" ] && [ -n "$BKEY_V" ] && warn "Había una clave de cifrado de respaldos: se conserva (los respaldos antiguos la necesitan)."
+
   umask 077
   cat > "$ENV_FILE" <<ENV
 # Generado por install.sh el $(date -Iseconds). NO subir a git. Permisos 600.
 SONRISAS_DIR=$DIR
+TZ=$TZ_VALUE
+
+# --- Acceso ---
+# http  = puerto directo (APP_BIND:APP_PORT → 3000), sin Caddy.
+# https = Caddy + Let's Encrypt en 80/443 (perfil "https" de docker compose).
+PUBLIC_MODE=$PUBLIC_MODE
+APP_PORT=$APP_PORT
+APP_BIND=$APP_BIND
 SITE_ADDRESS=$SITE_ADDRESS
 HTTP_PORT=80
 HTTPS_PORT=443
-TZ=$TZ_VALUE
+FRONTEND_URL=$FRONTEND
+BACKEND_URL=$FRONTEND
+# true sólo con un proxy delante (Caddy o el tuyo): IP real del cliente en los límites de intentos.
+TRUST_PROXY=$TRUST_PROXY
 
-DB_USERNAME=sonrisas
-DB_PASSWORD=$(rand_hex 24)
-DB_NAME=sonrisas
+DB_USERNAME=$DB_USER_V
+DB_PASSWORD=$DB_PASS_V
+DB_NAME=$DB_NAME_V
 DB_SYNC=false
 
-JWT_SECRET=$(rand_hex 48)
+JWT_SECRET=$JWT_V
 JWT_EXPIRES_IN=7d
 UPLOADS_REQUIRE_AUTH=true
 
-FRONTEND_URL=https://$SITE_ADDRESS
-BACKEND_URL=https://$SITE_ADDRESS
-
+# Cuenta de dirección. La contraseña NO se guarda aquí: para cambiarla, ./deploy.sh admin
 ADMIN_EMAIL=$ADMIN_EMAIL
-ADMIN_PASSWORD=$GENERATED_ADMIN_PW
+ADMIN_PASSWORD=
 ADMIN_NAME=$ADMIN_NAME
 COMPANY_NAME=$COMPANY_NAME
-COMPANY_TAGLINE=Control y seguimiento infantil
+COMPANY_TAGLINE=$COMPANY_TAGLINE
 
 WHATSAPP_PROVIDER=linked
 WHATSAPP_LOG_LEVEL=silent
@@ -187,13 +355,13 @@ WHATSAPP_API_VERSION=v21.0
 WHATSAPP_TEMPLATE_NAME=
 WHATSAPP_TEMPLATE_LANG=es
 
-VAPID_PUBLIC_KEY=
-VAPID_PRIVATE_KEY=
+VAPID_PUBLIC_KEY=$VAPID_PUB_V
+VAPID_PRIVATE_KEY=$VAPID_PRIV_V
 VAPID_SUBJECT=mailto:$ADMIN_EMAIL
 
 # Respaldos: nocturno 03:15; 14 nocturnos, 10 de seguridad y hasta 30 manuales.
 # SIN la clave no se pueden abrir los respaldos: guárdala también FUERA del servidor.
-BACKUP_ENCRYPTION_KEY=$GENERATED_BACKUP_KEY
+BACKUP_ENCRYPTION_KEY=$BKEY_V
 BACKUP_CRON=15 3 * * *
 BACKUP_KEEP_DAILY=14
 BACKUP_KEEP_SAFETY=10
@@ -205,26 +373,57 @@ ENV
   log ".env.production creado (permisos 600)"
 fi
 
+# Valores efectivos (del archivo nuevo o del conservado)
+MODE="$(env_val PUBLIC_MODE "$ENV_FILE")"; MODE="${MODE:-https}"   # sin PUBLIC_MODE = instalación antigua con Caddy
+PORT_V="$(env_val APP_PORT "$ENV_FILE")"; PORT_V="${PORT_V:-8986}"
+BIND_V="$(env_val APP_BIND "$ENV_FILE")"; [ -n "$BIND_V" ] || { [ "$MODE" = "https" ] && BIND_V=127.0.0.1 || BIND_V=0.0.0.0; }
+URL_V="$(env_val FRONTEND_URL "$ENV_FILE")"
+
 # ------------------------------------------------------------ firewall
 if command -v ufw >/dev/null 2>&1 && grep -q "Status: active" <<<"$(ufw status 2>/dev/null || true)"; then
-  ufw allow 80/tcp >/dev/null && ufw allow 443/tcp >/dev/null && log "ufw: abiertos 80/tcp y 443/tcp"
+  if [ "$MODE" = "https" ]; then
+    ufw allow 80/tcp >/dev/null && ufw allow 443/tcp >/dev/null && log "ufw: abiertos 80/tcp y 443/tcp"
+  fi
+  if [ "$BIND_V" != "127.0.0.1" ]; then
+    ufw allow "$PORT_V/tcp" >/dev/null && log "ufw: abierto $PORT_V/tcp"
+  fi
   grep -qE '^(22|OpenSSH)' <<<"$(ufw status)" || warn "ufw no tiene SSH (22) permitido: revisa que no te quedes sin acceso."
+fi
+if [ "$BIND_V" != "127.0.0.1" ]; then
+  info_port="$(ss -ltnH "sport = :$PORT_V" 2>/dev/null | head -n1 || true)"
+  if [ -n "$info_port" ] && ! docker ps --format '{{.Names}}' 2>/dev/null | grep -qx sonrisas_api; then
+    die "El puerto $PORT_V ya está en uso por otro programa. Libéralo o elige otro (APP_PORT en .env.production)."
+  fi
 fi
 
 # ------------------------------------------------------------ construir y arrancar
 log "Construyendo y arrancando (la primera vez tarda varios minutos)…"
-SONRISAS_NONINTERACTIVE=1 "$DIR/deploy.sh" install
+# La contraseña viaja sólo en el entorno del proceso (no en disco ni en la línea de órdenes);
+# deploy.sh se la pasa al seed por la entrada estándar.
+if [ -n "$ADMIN_PW" ]; then
+  SONRISAS_NONINTERACTIVE=1 SONRISAS_ADMIN_EMAIL="$ADMIN_EMAIL" SONRISAS_ADMIN_PASSWORD="$ADMIN_PW" \
+    "$DIR/deploy.sh" install
+else
+  SONRISAS_NONINTERACTIVE=1 "$DIR/deploy.sh" install
+fi
+ADMIN_PW=""; unset ADMIN_PASSWORD 2>/dev/null || true
 
-site="$(grep -E '^SITE_ADDRESS=' "$ENV_FILE" | cut -d= -f2-)"
-admin_email="$(grep -E '^ADMIN_EMAIL=' "$ENV_FILE" | cut -d= -f2-)"
+admin_email="$(env_val ADMIN_EMAIL "$ENV_FILE")"
+[ -n "${ADMIN_EMAIL:-}" ] && admin_email="$ADMIN_EMAIL"
+lan_ip="$(hostname -I 2>/dev/null | awk '{print $1}' || true)"
 echo
 echo -e "${B}============================================================${N}"
 echo -e "${B} Sonrisas instalado${N}"
 echo -e "${B}============================================================${N}"
-echo " Dirección web:   https://$site"
-echo " Cuenta:          $admin_email"
-if [ -n "$GENERATED_ADMIN_PW" ]; then
-  echo -e " Contraseña:      ${B}$GENERATED_ADMIN_PW${N}   ← anótala; cámbiala al entrar y activa 2FA"
+echo -e " Dirección web:   ${B}$URL_V${N}"
+if [ "$MODE" = "http" ] && [ -n "$lan_ip" ] && [ "$BIND_V" != "127.0.0.1" ]; then
+  echo "                  (en la red local también: http://$lan_ip:$PORT_V)"
+fi
+echo " Usuario:         $admin_email   (la contraseña es la que escribiste; no se guarda)"
+echo "                  Al entrar, activa la verificación en dos pasos (Seguridad)."
+if [[ "$URL_V" == http://* ]]; then
+  echo -e " ${Y}Sin HTTPS:${N}       la cámara y la instalación como app necesitan HTTPS."
+  echo "                  Pon un proxy con certificado delante (DEPLOY.md → Proxy propio)."
 fi
 if [ -n "$GENERATED_BACKUP_KEY" ]; then
   echo
@@ -233,6 +432,7 @@ if [ -n "$GENERATED_BACKUP_KEY" ]; then
   echo "   Sin ella no se puede restaurar ningún respaldo si el servidor se pierde."
 fi
 echo
+echo " Cambiar contraseña o crear la cuenta:  cd $DIR && ./deploy.sh admin"
 echo " Respaldos:       nocturnos automáticos + desde Panel → Respaldos (volumen sonrisas_backups)"
 echo "                  copia fuera del servidor: scripts/offsite-copy.sh (ver DEPLOY.md)"
 echo " Actualizar:      Panel → Sistema, o  cd $DIR && ./deploy.sh update"

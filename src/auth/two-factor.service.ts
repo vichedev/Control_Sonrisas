@@ -24,7 +24,7 @@ export class TwoFactorService {
   ) {}
 
   private issuer(): string {
-    return this.config.get<string>('COMPANY_NAME') || 'Sonrisas';
+    return this.config.get<string>('COMPANY_NAME') || 'Sonrisitas';
   }
 
   /** Trae el usuario incluyendo `totpSecret` y `password` (ambos son `select: false`). */

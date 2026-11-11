@@ -22,7 +22,8 @@
 #   history                 Historial de actualizaciones.
 #   migrations              Estado de las migraciones de la BD.
 #   up | restart | stop     Levantar / reiniciar / detener (stop NO borra datos).
-#   admin                   Crea/actualiza la cuenta de dirección (seed).
+#   admin                   Crea la cuenta de dirección o le cambia la contraseña
+#                           (la pide oculta; no se guarda en disco).
 #   psql                    Consola de PostgreSQL.
 #   shell                   Shell dentro del contenedor api.
 #   redeploy                Reconstruye el código actual (sin cambiar de versión), con
@@ -30,6 +31,8 @@
 #   help                    Esta ayuda.
 #
 # Opciones generales: --yes (no preguntar), --force.
+# Modo de acceso (PUBLIC_MODE en .env.production): http = puerto directo APP_PORT (8986);
+# https = Caddy en 80/443. Todas las órdenes activan el perfil de Caddy según el modo.
 # ============================================================
 
 set -Eeuo pipefail
@@ -43,6 +46,10 @@ if [ -z "${SONRISAS_DEPLOY_COPY:-}" ]; then
 fi
 
 PROJECT_DIR="$(cd "$SONRISAS_DIR" && pwd)"
+# Contraseña de dirección que pasa install.sh: se guarda en una variable NO exportada y se
+# quita del entorno para que no la hereden docker ni otros procesos.
+ADMIN_PW_IN="${SONRISAS_ADMIN_PASSWORD:-}"
+unset SONRISAS_ADMIN_PASSWORD
 cd "$PROJECT_DIR"
 
 ENV_FILE="$PROJECT_DIR/.env.production"
@@ -85,7 +92,39 @@ die()  { err "$*"; exit 1; }
 cleanup() { rm -f "${SONRISAS_DEPLOY_COPY:-}"; }
 trap cleanup EXIT
 
-DC() { docker compose --project-directory "$PROJECT_DIR" -f "$PROJECT_DIR/docker-compose.yml" --env-file "$ENV_FILE" "$@"; }
+# Modo de acceso (PUBLIC_MODE): http = puerto directo (APP_PORT, sin Caddy);
+# https = Caddy en 80/443 (perfil "https" del compose). Sin PUBLIC_MODE (instalaciones
+# anteriores a esta opción, que siempre usaban Caddy) = https.
+public_mode() {
+  local m; m="$(env_get PUBLIC_MODE | tr '[:upper:]' '[:lower:]')"
+  case "$m" in http) echo http ;; *) echo https ;; esac
+}
+# Todas las órdenes de compose pasan por aquí: activan el perfil de Caddy sólo en https.
+DC() {
+  local prof=()
+  [ "$(public_mode)" = "https" ] && prof=(--profile https)
+  docker compose --project-directory "$PROJECT_DIR" -f "$PROJECT_DIR/docker-compose.yml" --env-file "$ENV_FILE" \
+    ${prof[@]+"${prof[@]}"} "$@"
+}
+# Caddy acorde al modo: en https lo levanta (recreándolo si se pide); en http lo retira
+# si quedó de un modo https anterior (libera 80/443).
+caddy_sync() { # [--force-recreate]
+  if [ "$(public_mode)" = "https" ]; then
+    DC up -d --no-deps "$@" caddy >/dev/null
+  elif docker inspect sonrisas_caddy >/dev/null 2>&1; then
+    info "Modo puerto directo: retiro Caddy (contenedor sonrisas_caddy)"
+    docker rm -f sonrisas_caddy >/dev/null 2>&1 || true
+  fi
+}
+# URL pública para mensajes.
+public_url() {
+  local u; u="$(env_get FRONTEND_URL)"; u="${u%%,*}"
+  if [ -z "$u" ]; then
+    if [ "$(public_mode)" = "https" ]; then u="https://$(env_get SITE_ADDRESS)"
+    else u="http://$(env_get SITE_ADDRESS):$(env_get APP_PORT)"; fi
+  fi
+  printf '%s' "$u"
+}
 
 # ------------------------------------------------------------ utilidades
 require_docker() {
@@ -175,7 +214,16 @@ validate_env() {
   [ "${#dbp}" -ge 16 ] || die "DB_PASSWORD demasiado corta (mínimo 16 caracteres)."
   [ "${#jwt}" -ge 32 ] || die "JWT_SECRET debe tener al menos 32 caracteres (openssl rand -base64 48)."
   [[ "$jwt" =~ genera-una-cadena|changeme|placeholder ]] && die "JWT_SECRET es el valor de ejemplo. Genera uno nuevo."
-  [ -n "$site" ] && [ "$site" != "tu-dominio.com" ] || die "Configura SITE_ADDRESS (dominio o IP) en .env.production."
+  local mode port; mode="$(public_mode)"; port="$(env_get APP_PORT)"
+  if [ "$mode" = "https" ]; then
+    [ -n "$site" ] && [ "$site" != "tu-dominio.com" ] || die "Modo https: configura SITE_ADDRESS (dominio o IP) en .env.production."
+  else
+    [ -n "$(env_get FRONTEND_URL)" ] || die "Modo http: configura FRONTEND_URL (p. ej. http://203.0.113.10:8986) en .env.production."
+  fi
+  if [ -n "$port" ] && ! [[ "$port" =~ ^[0-9]{1,5}$ && "$port" -ge 1 && "$port" -le 65535 ]]; then
+    die "APP_PORT inválido: $port"
+  fi
+  [ -n "$(env_get ADMIN_PASSWORD)" ] && warn "ADMIN_PASSWORD tiene valor en .env.production: no hace falta guardarla; se borrará tras crear la cuenta (./deploy.sh admin)."
   local key; key="$(env_get BACKUP_ENCRYPTION_KEY)"
   if [ -n "$key" ] && [ "${#key}" -lt 16 ]; then die "BACKUP_ENCRYPTION_KEY demasiado corta (mínimo 16; recomendado 32+)."; fi
   [ -z "$key" ] && warn "Los respaldos NO se cifran (BACKUP_ENCRYPTION_KEY vacía). Recomendado activarlo."
@@ -192,6 +240,15 @@ migrate_env_file() {
     warn "DB_SYNC=true → false: en producción el esquema se gestiona con migraciones (synchronize puede borrar columnas)."
   fi
   if [ -z "$(env_get SONRISAS_DIR)" ]; then env_set SONRISAS_DIR "$PROJECT_DIR"; changed=1; fi
+  # Instalaciones anteriores al modo "puerto directo": siempre tenían Caddy delante.
+  # Se fija explícitamente para que nada cambie (8986 sólo en local, proxy de confianza).
+  if ! grep -qE '^PUBLIC_MODE=' "$ENV_FILE"; then
+    env_set PUBLIC_MODE https; changed=1
+    grep -qE '^APP_PORT=' "$ENV_FILE" || env_set APP_PORT 8986
+    grep -qE '^APP_BIND=' "$ENV_FILE" || env_set APP_BIND 127.0.0.1
+    grep -qE '^TRUST_PROXY=' "$ENV_FILE" || env_set TRUST_PROXY true
+    info "PUBLIC_MODE=https (instalación con Caddy); la app también escucha en 127.0.0.1:8986"
+  fi
   [ "$changed" = "1" ] && info ".env.production actualizado" || true
 }
 
@@ -310,7 +367,10 @@ cmd_install() {
     info "Ya hay una instalación ($(current_version)). Levanto los servicios sin reconstruir."
     info "Para cambiar de versión usa: ./deploy.sh update"
     DC up -d
+    caddy_sync
     wait_api_healthy || die "La api no está sana. Revisa: ./deploy.sh logs"
+    run_seed_after_install
+    log "Listo: $(public_url)"
     return 0
   fi
   # Instalación anterior (sin este sistema de versiones) con datos: volcado SQL de seguridad.
@@ -324,15 +384,105 @@ cmd_install() {
   DC build updater
   ensure_vapid
   fix_permissions current
-  log "Levantando contenedores…"
+  log "Levantando contenedores ($( [ "$(public_mode)" = https ] && echo "HTTPS con Caddy" || echo "puerto directo $(env_get APP_BIND):$(env_get APP_PORT)"))…"
   DC up -d
+  caddy_sync
   wait_api_healthy 240 || { DC logs --tail 120 api; die "La api no arrancó. Revisa los logs de arriba."; }
-  log "Creando la cuenta de dirección (seed)…"
-  DC exec -T api node dist/seed.js || warn "El seed falló. Reintenta con: ./deploy.sh admin"
+  run_seed_after_install
   state_set CURRENT_VERSION "$ver"; state_set CURRENT_REF "$ref"
   state_set CURRENT_MIGRATIONS "$(migrations_count)"
   history_add install success "" "$ver" "" "Instalación inicial"
-  log "Instalación lista: https://$(env_get SITE_ADDRESS)"
+  log "Instalación lista: $(public_url)"
+}
+
+# ------------------------------------------------------------ cuenta de dirección
+# Política de contraseñas de la app (src/common/password.validator.ts). Motivo o "".
+password_problem() {
+  local pw="$1" lower
+  [ "${#pw}" -ge 10 ] || { echo "debe tener al menos 10 caracteres"; return; }
+  [ "${#pw}" -le 128 ] || { echo "no puede superar los 128 caracteres"; return; }
+  [[ "$pw" =~ [A-Za-zÁÉÍÓÚáéíóúÑñ] ]] || { echo "debe incluir al menos una letra"; return; }
+  [[ "$pw" =~ [0-9] ]] || { echo "debe incluir al menos un número"; return; }
+  [[ "$pw" =~ ^(.)\1+$ ]] && { echo "no puede ser el mismo carácter repetido"; return; }
+  lower="$(printf '%s' "$pw" | tr '[:upper:]' '[:lower:]')"
+  case "$lower" in
+    password1|password123|contrasena1|contrasena123|contraseña1|admin12345|administrador1|qwerty12345|asdf12345|1234567890|abcd123456|facetowork1|facetowork123|usuario123|trabajador1)
+      echo "es demasiado común"; return ;;
+  esac
+  [[ "$lower" =~ ^(0123456789|abcdefghij|qwertyuiop) ]] && { echo "es demasiado predecible"; return; }
+  echo ""
+}
+
+# Ejecuta el seed. La contraseña (si la hay) va por la ENTRADA ESTÁNDAR del contenedor:
+# no queda en disco, ni en el entorno del contenedor, ni en la lista de procesos.
+seed_admin() { # email password(""=no) reset(0|1) [nombre]
+  local email="$1" pw="$2" reset="$3" name="${4:-}"
+  local envs=(-e "ADMIN_EMAIL=$email" -e "SEED_RESET_PASSWORD=$reset")
+  [ -n "$name" ] && envs+=(-e "ADMIN_NAME=$name")
+  if [ -n "$pw" ]; then
+    printf '%s\n' "$pw" | DC exec -T "${envs[@]}" -e ADMIN_PASSWORD_STDIN=1 api node dist/seed.js
+  else
+    DC exec -T "${envs[@]}" api node dist/seed.js </dev/null
+  fi
+}
+
+# Si .env.production aún guarda ADMIN_PASSWORD (instalación manual), se vacía y se
+# recrea la api para que tampoco quede en su entorno.
+scrub_admin_password() {
+  [ -n "$(env_get ADMIN_PASSWORD)" ] || return 0
+  env_set ADMIN_PASSWORD ""
+  info "ADMIN_PASSWORD borrada de .env.production (la cuenta ya existe; para cambiarla: ./deploy.sh admin)"
+  DC up -d --no-deps api >/dev/null && wait_api_healthy || warn "Revisa la api: ./deploy.sh status"
+}
+
+# Paso de seed de `install`: con la contraseña que pasa install.sh (SONRISAS_ADMIN_PASSWORD,
+# sólo en el entorno del proceso) o, en instalaciones manuales, con la de .env.production.
+run_seed_after_install() {
+  local email pw
+  email="${SONRISAS_ADMIN_EMAIL:-$(env_get ADMIN_EMAIL)}"
+  pw="${ADMIN_PW_IN:-$(env_get ADMIN_PASSWORD)}"
+  ADMIN_PW_IN=""
+  if [ -z "$email" ]; then warn "Falta ADMIN_EMAIL: crea la cuenta de dirección con ./deploy.sh admin"; return 0; fi
+  log "Cuenta de dirección (seed)…"
+  if seed_admin "$email" "$pw" "$( [ -n "$pw" ] && echo 1 || echo 0 )"; then
+    scrub_admin_password
+    [ "$email" = "$(env_get ADMIN_EMAIL)" ] || env_set ADMIN_EMAIL "$email"
+  else
+    warn "El seed falló. Reintenta con: ./deploy.sh admin"
+  fi
+}
+
+# `./deploy.sh admin`: crea la cuenta de dirección o le cambia la contraseña (la pide
+# oculta, dos veces). Sin terminal usa ADMIN_PASSWORD de .env.production (y la borra).
+cmd_admin() {
+  require_docker; require_env
+  local email pw p2 why name
+  if ! { : </dev/tty; } 2>/dev/null || [ "${SONRISAS_NONINTERACTIVE:-0}" = "1" ]; then
+    email="$(env_get ADMIN_EMAIL)"; pw="${ADMIN_PW_IN:-$(env_get ADMIN_PASSWORD)}"
+    [ -n "$email" ] || die "Falta ADMIN_EMAIL en .env.production."
+    [ -n "$pw" ] || die "Sin terminal: ejecuta ./deploy.sh admin en una sesión interactiva (pide la contraseña) o pon ADMIN_PASSWORD en .env.production (se borra al terminar)."
+    seed_admin "$email" "$pw" 1 && scrub_admin_password
+    return
+  fi
+  echo -e "${BOLD}Cuenta de dirección${NC}: se crea si no existe, o se le pone la contraseña nueva."
+  read -r -p "Usuario (correo) [$(env_get ADMIN_EMAIL)]: " email </dev/tty || true
+  email="${email:-$(env_get ADMIN_EMAIL)}"
+  [[ "$email" =~ ^[^@[:space:]]+@[^@[:space:]]+\.[^@[:space:]]+$ ]] || die "Correo inválido."
+  echo "La contraseña debe tener mínimo 10 caracteres, con al menos una letra y un número."
+  while true; do
+    read -r -s -p "Contraseña nueva: " pw </dev/tty || true; echo >/dev/tty
+    why="$(password_problem "$pw")"
+    [ -z "$why" ] || { echo "  La contraseña $why."; continue; }
+    read -r -s -p "Repítela: " p2 </dev/tty || true; echo >/dev/tty
+    [ "$pw" = "$p2" ] && break
+    echo "  No coinciden."
+  done
+  name="$(env_get ADMIN_NAME)"
+  seed_admin "$email" "$pw" 1 "$name" || die "No se pudo crear/actualizar la cuenta."
+  pw=""; p2=""
+  [ "$email" != "$(env_get ADMIN_EMAIL)" ] && env_set ADMIN_EMAIL "$email"
+  scrub_admin_password
+  log "Listo. Entra en $(public_url) con $email"
 }
 
 # Volcado SQL simple con las herramientas del propio contenedor de Postgres (no depende
@@ -389,10 +539,10 @@ switch_to_image() { # new_tag prev_ver prev_ref new_ver new_ref action
 
   if wait_api_healthy; then
     DC up -d --no-deps --force-recreate backup >/dev/null
-    if [ -n "$prev_ref" ] && ! git diff --quiet "$prev_ref" HEAD -- Caddyfile 2>/dev/null; then
-      log "Caddyfile cambió: reiniciando Caddy"; DC up -d --no-deps --force-recreate caddy >/dev/null
+    if [ "$(public_mode)" = "https" ] && [ -n "$prev_ref" ] && ! git diff --quiet "$prev_ref" HEAD -- Caddyfile 2>/dev/null; then
+      log "Caddyfile cambió: reiniciando Caddy"; caddy_sync --force-recreate
     else
-      DC up -d --no-deps caddy >/dev/null
+      caddy_sync
     fi
     mig_after="$(migrations_count)"
     state_set PREVIOUS_VERSION "$prev_ver"; state_set PREVIOUS_REF "$prev_ref"
@@ -635,7 +785,7 @@ cmd_versions() {
 cmd_history() { [ -f "$HISTORY_FILE" ] && tail -n 30 "$HISTORY_FILE" || echo "(sin historial)"; }
 cmd_migrations() { require_docker; require_env; DC exec -T api node dist/database/migrate-cli.js show; }
 
-cmd_help() { sed -n '2,33p' "$SONRISAS_DEPLOY_COPY" | sed 's/^# \{0,1\}//'; }
+cmd_help() { sed -n '2,36p' "$SONRISAS_DEPLOY_COPY" | sed 's/^# \{0,1\}//'; }
 
 case "${1:-help}" in
   install|full) cmd_install ;;
@@ -653,10 +803,10 @@ case "${1:-help}" in
   versions)   cmd_versions ;;
   history)    cmd_history ;;
   migrations) cmd_migrations ;;
-  up)         require_docker; require_env; validate_env; DC up -d ;;
+  up)         require_docker; require_env; validate_env; migrate_env_file; DC up -d; caddy_sync; info "$(public_url)" ;;
   restart)    require_docker; require_env; DC restart ;;
   stop)       require_docker; require_env; DC stop ;;
-  admin)      require_docker; require_env; DC exec -T api node dist/seed.js ;;
+  admin)      cmd_admin ;;
   psql)       require_docker; require_env; DC exec db sh -c 'PGPASSWORD="$POSTGRES_PASSWORD" psql -U "$POSTGRES_USER" -d "$POSTGRES_DB"' ;;
   shell)      require_docker; require_env; DC exec api sh ;;
   help|-h|--help) cmd_help ;;

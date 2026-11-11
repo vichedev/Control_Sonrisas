@@ -1,0 +1,47 @@
+{
+  "name": "Sonrisas · Control y seguimiento infantil",
+  "short_name": "Sonrisas",
+  "description": "Registro diario de los niños de la guardería: asistencia, alimentación, actividades y reporte a las familias.",
+  "lang": "es-EC",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#0a0e1a",
+  "theme_color": "#fb7185",
+  "categories": ["education", "productivity"],
+  "icons": [
+    {
+      "src": "/favicon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any"
+    },
+    {
+      "src": "/icon-512.svg",
+      "sizes": "512x512",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ],
+  "shortcuts": [
+    {
+      "name": "Entradas y salidas",
+      "short_name": "El día",
+      "url": "/panel/dia",
+      "description": "Registrar llegadas y retiros de los niños"
+    },
+    {
+      "name": "Reportes a familias",
+      "short_name": "Reportes",
+      "url": "/panel/reportes",
+      "description": "Generar y enviar el reporte diario por WhatsApp"
+    },
+    {
+      "name": "Portal familiar",
+      "short_name": "Mi niño",
+      "url": "/familia",
+      "description": "Ver cómo va el día de tu niño"
+    }
+  ]
+}

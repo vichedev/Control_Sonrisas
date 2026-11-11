@@ -40,9 +40,9 @@ export class WhatsappAccessService {
   private async centerName(): Promise<string> {
     try {
       const b = await this.branding.find({ take: 1, order: { createdAt: 'ASC' } });
-      return b[0]?.companyName || 'Sonrisas';
+      return b[0]?.companyName || 'Sonrisitas';
     } catch {
-      return 'Sonrisas';
+      return 'Sonrisitas';
     }
   }
 

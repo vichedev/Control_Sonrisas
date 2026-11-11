@@ -120,10 +120,13 @@ Las **fotos no viajan en el mensaje**: el reporte las menciona y la familia las 
 
 ## Despliegue
 
-Producción con **Docker Compose** en Ubuntu/Debian (Caddy + NestJS + PostgreSQL + respaldos + actualizador). Guía completa: **[DEPLOY.md](DEPLOY.md)**.
+Producción con **Docker Compose** en Ubuntu/Debian (NestJS + PostgreSQL + respaldos + actualizador, y Caddy en modo HTTPS). Guía completa: **[DEPLOY.md](DEPLOY.md)**.
 
 ```bash
-# Instalación en el servidor (una línea; pregunta dominio/IP, cuenta de dirección y zona horaria)
+# Instalación en el servidor (una línea). Pregunta el usuario y la contraseña de dirección
+# (oculta, no se guarda en disco), el nombre del centro y el modo de acceso:
+#   1) puerto directo http://IP-o-dominio:8986 (Docker 8986:3000, por defecto)
+#   2) HTTPS con dominio (Caddy + Let's Encrypt en 80/443)
 curl -fsSL https://raw.githubusercontent.com/vichedev/Control_Sonrisas/main/install.sh | sudo bash
 
 cd /opt/sonrisas
@@ -131,7 +134,10 @@ cd /opt/sonrisas
 ./deploy.sh update            # a la última versión publicada (respaldo previo + vuelta atrás automática)
 ./deploy.sh rollback          # volver a la versión anterior
 ./deploy.sh backup            # respaldo manual (también desde Panel → Respaldos)
+./deploy.sh admin             # crear la cuenta de dirección o cambiarle la contraseña
 ```
+
+> En modo puerto directo (HTTP) el navegador no permite la cámara ni instalar la app: pon delante un proxy con HTTPS (ejemplo de Nginx en [DEPLOY.md §1.1](DEPLOY.md)) o usa el modo 2.
 
 - **Versiones:** cada versión es un tag `vX.Y.Z` en GitHub. Publicar: subir `version` en `package.json`, `git tag -a v1.2.0 -m "Notas…"` y `git push --tags`.
 - **Esquema de la BD:** en producción se usan **migraciones** (`DB_SYNC=false`, nunca `synchronize`). Tras cambiar entidades: `npm run migration:generate -- src/database/migrations/NombreDelCambio`.

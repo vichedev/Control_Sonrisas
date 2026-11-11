@@ -1,8 +1,9 @@
 # Dependencias y compilados
 node_modules
 dist
-# public/ lo genera `npm run build:web` (frontend compilado que sirve NestJS)
-public
+# /public lo genera `npm run build:web` (frontend compilado que sirve NestJS). Anclado a la
+# raíz: client/public (sw.js, manifest, iconos, logo por defecto) SÍ va en git.
+/public
 
 # Secretos
 # Sesión del WhatsApp vinculado (equivale a tener el teléfono abierto)

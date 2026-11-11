@@ -1,14 +1,20 @@
 name: sonrisas
 
-# Topología (sólo Caddy publica puertos: 80 y 443):
-#   caddy    → reverse proxy con TLS (Let's Encrypt con dominio; auto-firmado con IP)
+# Topología. Dos modos de acceso (PUBLIC_MODE en .env.production):
+#   · http  (por defecto en install.sh): la api publica APP_BIND:APP_PORT → 3000
+#           (install.sh escribe APP_BIND=0.0.0.0, APP_PORT=8986).
+#           Sin Caddy. http://IP-o-dominio:8986 (o tu propio proxy con TLS delante).
+#   · https : además arranca Caddy (perfil `https`) en 80/443 con Let's Encrypt; el
+#           8986 queda sólo en 127.0.0.1 salvo que se pida exponerlo (APP_BIND=0.0.0.0).
+#   caddy    → reverse proxy con TLS (sólo perfil https: `--profile https`)
 #   api      → NestJS (API /api/* + SPA). Migraciones al arrancar; respaldos desde la app
 #   db       → PostgreSQL 16 (red interna SIN salida a internet, nunca publicado)
 #   backup   → respaldo nocturno (misma imagen que la api = mismo formato)
 #   updater  → aplica actualizaciones / vuelta atrás / restauraciones pedidas desde la app.
 #              Sin puertos; habla con la api sólo por archivos en volúmenes.
 #
-# Usa SIEMPRE ./deploy.sh (lee .env.production). No ejecutes `docker compose down -v`:
+# Usa SIEMPRE ./deploy.sh (lee .env.production y activa el perfil según PUBLIC_MODE).
+# No ejecutes `docker compose down -v`:
 # borra la base de datos y las fotos.
 
 x-logging: &logging
@@ -89,9 +95,18 @@ services:
       UPLOADS_REQUIRE_AUTH: ${UPLOADS_REQUIRE_AUTH:-true}
       FRONTEND_URL: ${FRONTEND_URL}
       BACKEND_URL: ${BACKEND_URL}
-      TRUST_PROXY: "true"
-      ADMIN_EMAIL: ${ADMIN_EMAIL}
-      ADMIN_PASSWORD: ${ADMIN_PASSWORD}
+      # http | https. Con https (o FRONTEND_URL https://) la api envía HSTS y
+      # upgrade-insecure-requests en las peticiones que llegan por TLS.
+      PUBLIC_MODE: ${PUBLIC_MODE:-http}
+      # true sólo si hay un proxy delante (Caddy en modo https, o el tuyo propio):
+      # la api toma la IP real del cliente de X-Forwarded-For (límites de intentos).
+      # install.sh lo fija siempre; el valor por defecto es el de las instalaciones
+      # anteriores (que siempre tenían Caddy delante).
+      TRUST_PROXY: ${TRUST_PROXY:-true}
+      ADMIN_EMAIL: ${ADMIN_EMAIL:-}
+      # Normalmente VACÍA: install.sh y `deploy.sh admin` pasan la contraseña al seed por
+      # la entrada estándar y nunca la guardan en disco.
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:-}
       ADMIN_NAME: ${ADMIN_NAME:-Dirección}
       # WhatsApp: 'manual' genera enlaces wa.me; 'linked' envía desde el número del centro
       # vinculado por QR (en manual también se usa si está conectado); 'cloud' = API de Meta.
@@ -107,8 +122,8 @@ services:
       VAPID_PUBLIC_KEY: ${VAPID_PUBLIC_KEY:-}
       VAPID_PRIVATE_KEY: ${VAPID_PRIVATE_KEY:-}
       VAPID_SUBJECT: ${VAPID_SUBJECT:-mailto:admin@example.com}
-      COMPANY_NAME: ${COMPANY_NAME:-Sonrisas}
-      COMPANY_TAGLINE: ${COMPANY_TAGLINE:-Control y seguimiento infantil}
+      COMPANY_NAME: ${COMPANY_NAME:-Sonrisitas}
+      COMPANY_TAGLINE: ${COMPANY_TAGLINE:-Centro de Desarrollo Infantil}
       # Respaldos y actualizador
       BACKUP_UPLOAD_MAX_MB: ${BACKUP_UPLOAD_MAX_MB:-2048}
       OPS_JOBS_DIR: /ops/jobs
@@ -121,8 +136,12 @@ services:
       - sonrisas_ops_jobs:/ops/jobs
       - sonrisas_ops_status:/ops/status:ro
     networks: [backend, edge]
-    expose:
-      - "3000"
+    # Puerto directo (modo http): install.sh pone APP_BIND=0.0.0.0 → http://IP:8986.
+    # En modo https queda en 127.0.0.1 (sólo local) salvo que se pida exponerlo.
+    # El valor por defecto (127.0.0.1) protege a las instalaciones anteriores con Caddy.
+    # Ojo: Docker publica puertos por delante de ufw (ver DEPLOY.md → Firewall).
+    ports:
+      - "${APP_BIND:-127.0.0.1}:${APP_PORT:-8986}:3000"
     read_only: true
     tmpfs:
       - /tmp:size=512m
@@ -171,6 +190,8 @@ services:
     logging: *logging
 
   caddy:
+    # Sólo en modo HTTPS: `docker compose --profile https …` (deploy.sh lo pone solo).
+    profiles: ["https"]
     image: caddy:2-alpine
     container_name: sonrisas_caddy
     restart: unless-stopped
@@ -181,7 +202,9 @@ services:
       - "${HTTP_PORT:-80}:80"
       - "${HTTPS_PORT:-443}:443"
     environment:
-      SITE_ADDRESS: ${SITE_ADDRESS:?Falta SITE_ADDRESS en .env.production}
+      # (deploy.sh exige SITE_ADDRESS en modo https; aquí no se exige para que el modo
+      # http, sin Caddy, no falle al interpolar el archivo.)
+      SITE_ADDRESS: ${SITE_ADDRESS:-localhost}
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       - sonrisas_caddy_data:/data
@@ -234,7 +257,7 @@ networks:
   # Interna: db, api y backup. Sin salida a internet.
   backend:
     internal: true
-  # Caddy ↔ api, y salida a internet de la api (WhatsApp, push, Let's Encrypt).
+  # Caddy ↔ api, puerto publicado de la api, y su salida a internet (WhatsApp, push).
   edge: {}
   # Sólo el actualizador (git fetch a GitHub).
   updater: {}

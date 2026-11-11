@@ -16,8 +16,8 @@ export class BrandingController {
 
   /** Público: el login y la SPA leen marca antes de autenticarse. */
   @Get()
-  get() {
-    return this.service.get();
+  async get() {
+    return this.service.toView(await this.service.get());
   }
 
   /**
@@ -33,15 +33,15 @@ export class BrandingController {
    * Logo público de la empresa. Existe porque /uploads dejó de ser público
    * (contiene fotos de rostro): la pantalla de login necesita mostrar el logo
    * SIN sesión, y el logo sí es información pública. Sirve sólo ese archivo,
-   * nunca uno arbitrario.
+   * nunca uno arbitrario. Sin logo propio sirve el de por defecto
+   * (public/brand/sonrisitas-logo.png).
    */
   @Get('logo')
   async logo(@Res() res: Response) {
-    const b = await this.service.get();
     res.setHeader('Cache-Control', 'public, max-age=300, must-revalidate');
     res.setHeader('X-Content-Type-Options', 'nosniff');
     res.setHeader('Content-Security-Policy', "default-src 'none'; sandbox");
-    const file = b.logoUrl ? this.uploads.readBuffer(b.logoUrl) : null;
+    const file = await this.service.logoFile();
     if (!file) return res.status(404).end();
     res.setHeader('Content-Type', file.mime);
     res.setHeader('Content-Length', String(file.buf.length));
@@ -75,7 +75,7 @@ export class BrandingController {
 
   @UseGuards(AdminGuard)
   @Patch()
-  update(@Body() dto: UpdateBrandingDto) {
-    return this.service.update(dto);
+  async update(@Body() dto: UpdateBrandingDto) {
+    return this.service.toView(await this.service.update(dto));
   }
 }

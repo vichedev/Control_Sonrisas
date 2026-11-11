@@ -3,14 +3,14 @@
 Guía para instalar, actualizar, volver atrás y respaldar Sonrisas en un servidor **Ubuntu/Debian** con Docker.
 
 ```text
-caddy    →  HTTPS (Let's Encrypt con dominio · auto-firmado con IP) — único con puertos (80/443)
-api      →  NestJS: API /api/* + la web. Aplica migraciones al arrancar
+api      →  NestJS: API /api/* + la web. Publica el puerto 8986 (→ 3000). Aplica migraciones al arrancar
+caddy    →  sólo en modo HTTPS: Let's Encrypt en 80/443 (perfil `https` de docker compose)
 db       →  PostgreSQL 16, en red interna sin internet, nunca publicado
 backup   →  respaldo nocturno (BD + fotos)
 updater  →  aplica actualizaciones / vuelta atrás / restauraciones pedidas desde la app
 ```
 
-**Datos que nunca se pierden** — viven en volúmenes de Docker, no en la carpeta del proyecto: `sonrisas_db_data` (BD), `sonrisas_uploads` (fotos), `sonrisas_backups` (respaldos), `sonrisas_wa_auth` (sesión de WhatsApp), `sonrisas_caddy_data` (certificados). Ningún comando de `deploy.sh` los borra.
+**Datos que nunca se pierden** — viven en volúmenes de Docker, no en la carpeta del proyecto: `sonrisas_db_data` (BD), `sonrisas_uploads` (fotos), `sonrisas_backups` (respaldos), `sonrisas_wa_auth` (sesión de WhatsApp), `sonrisas_caddy_data` (certificados, modo HTTPS). Ningún comando de `deploy.sh` los borra.
 
 > ⚠️ **Nunca** ejecutes `docker compose down -v` ni `docker volume rm`: borran la base de datos y las fotos.
 
@@ -18,37 +18,151 @@ updater  →  aplica actualizaciones / vuelta atrás / restauraciones pedidas de
 
 ## 1. Instalación (primera vez)
 
-Requisitos: Ubuntu 22.04/24.04 o Debian 12, 2 GB de RAM, 20 GB de disco, acceso root. Si usas dominio, su registro **A** debe apuntar a la IP del servidor **antes** de instalar.
+Requisitos: Ubuntu 22.04/24.04 o Debian 12, 2 GB de RAM, 20 GB de disco, acceso root (`sudo`).
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/vichedev/Control_Sonrisas/main/install.sh | sudo bash
 ```
 
-El instalador:
+### Qué pregunta el instalador
+
+| # | Pregunta | Por defecto |
+|---|---|---|
+| 1 | **Usuario** de la cuenta de dirección (correo) | — |
+| 1 | **Contraseña** (oculta, se pide dos veces). Política del sistema: **mínimo 10 caracteres, con al menos una letra y un número** (rechaza contraseñas comunes o de un solo carácter repetido) | — |
+| 1 | Nombre que se mostrará | `Dirección` |
+| 2 | Nombre del centro | `Sonrisitas` |
+| 2 | Lema / descripción | `Centro de Desarrollo Infantil` |
+| 2 | Zona horaria · código de país de WhatsApp | `America/Guayaquil` · `593` |
+| 3 | **Modo de acceso**: `1` puerto directo · `2` HTTPS con dominio | `1` |
+| 3 | IP pública o dominio del servidor · puerto | IP detectada · `8986` |
+| 4 | ¿Cifrar los respaldos? | sí |
+
+La **contraseña nunca se guarda en disco**: el instalador se la entrega al contenedor por la entrada estándar sólo para crear la cuenta (`ADMIN_PASSWORD` queda vacía en `.env.production`). Para cambiarla más adelante: `./deploy.sh admin`.
+
+### Los dos modos de acceso
+
+**1) Puerto directo (por defecto)** — Docker publica `8986:3000` y se entra por **`http://IP-o-dominio:8986`**. No arranca Caddy ni usa los puertos 80/443 (útil si el servidor ya tiene otra web).
+
+> ⚠️ **Sin HTTPS el navegador no permite usar la cámara** (fotos de entrada/salida) **ni instalar la app (PWA)**, salvo en `http://localhost`. Todo lo demás funciona. Para la cámara: pon delante un proxy con certificado (tu Nginx, Caddy o Cloudflare — ver §1.1) o reinstala con el modo 2. El instalador pregunta si ya tienes ese proxy: si dices que sí, pide la URL `https://…` pública y, si el proxy está en el mismo servidor, deja el 8986 sólo en `127.0.0.1`.
+
+**2) HTTPS con dominio (Caddy + Let's Encrypt)** — Caddy en 80/443 obtiene el certificado solo. El registro **A** del dominio debe apuntar a la IP del servidor **antes** de instalar (con una IP en vez de dominio el certificado es auto-firmado y el navegador avisa). La app sigue escuchando en el 8986 **sólo en `127.0.0.1`**; el instalador pregunta si quieres exponerlo también (por defecto no).
+
+### Qué hace, paso a paso
 
 1. Instala Docker (si falta), `git`, `jq`, `openssl`.
-2. Clona el proyecto en `/opt/sonrisas` (última versión publicada `vX.Y.Z`; si no hay, la rama `main`).
-3. Pregunta: dominio o IP, correo y nombre de la cuenta de dirección, nombre del centro, zona horaria (por defecto `America/Guayaquil`), código de país de WhatsApp (593) y si cifrar los respaldos (recomendado).
-4. Genera secretos fuertes (clave de BD, `JWT_SECRET`, contraseña inicial de dirección, clave de cifrado de respaldos, claves VAPID) y escribe `.env.production` con permisos **600**.
-5. Abre 80/443 si `ufw` está activo, construye la imagen, arranca todo, espera a que la API esté sana y crea la cuenta de dirección.
-6. Muestra **una sola vez** la contraseña de dirección y la **clave de cifrado de respaldos**.
+2. Clona el proyecto en `/opt/sonrisas` en la **última versión publicada** (`vX.Y.Z`; si no hay, `main`).
+3. Hace las preguntas de arriba (o las toma de variables de entorno, ver abajo).
+4. Genera secretos fuertes (clave de BD, `JWT_SECRET`, clave de cifrado de respaldos, claves VAPID) y escribe `.env.production` con permisos **600**. Si el archivo ya existe, ofrece **conservarlo** (por defecto) o **reconfigurar** (copia `.env.production.bak-FECHA`; se conservan la clave de la BD, `JWT_SECRET`, la de respaldos y VAPID). Aun conservándolo, pregunta si quieres fijar el usuario y la contraseña de dirección.
+5. Abre en `ufw` (si está activo) el 8986, o 80/443 en modo HTTPS.
+6. Construye la imagen, arranca todo, espera a que `/api/health` responda y crea la cuenta de dirección con el usuario y la contraseña indicados (si ya existe, le pone esa contraseña).
+7. Muestra la **URL** y el **usuario** (no la contraseña) y, una sola vez, la **clave de cifrado de respaldos**.
 
 > **Guarda la clave de cifrado FUERA del servidor** (gestor de contraseñas). Sin ella ningún respaldo cifrado se puede abrir si el servidor se pierde.
 
 Sin preguntas (automatizado):
 
 ```bash
-sudo SONRISAS_NONINTERACTIVE=1 SITE_ADDRESS=asistencia.midominio.com ADMIN_EMAIL=direccion@midominio.com \
-     ADMIN_NAME="Dirección" TZ=America/Guayaquil BACKUP_ENCRYPT=1 bash install.sh
+# Puerto directo
+read -rs ADMIN_PASSWORD && export ADMIN_PASSWORD     # así la contraseña no queda en el historial
+sudo -E SONRISAS_NONINTERACTIVE=1 PUBLIC_MODE=http PUBLIC_HOST=203.0.113.10 APP_PORT=8986 \
+     ADMIN_EMAIL=direccion@sonrisitas.com ADMIN_NAME="Dirección" \
+     COMPANY_NAME="Sonrisitas" COMPANY_TAGLINE="Centro de Desarrollo Infantil" \
+     TZ=America/Guayaquil BACKUP_ENCRYPT=1 bash install.sh
+
+# HTTPS con dominio: PUBLIC_MODE=https PUBLIC_HOST=asistencia.midominio.com [EXPOSE_APP_PORT=1]
+# Proxy propio delante (modo http): BEHIND_PROXY=1 PUBLIC_URL=https://asistencia.midominio.com [PROXY_LOCAL=1]
+# .env.production existente: KEEP_ENV=1 (conservar, por defecto) o KEEP_ENV=0 (reconfigurar)
 ```
 
-Volver a ejecutar el instalador es seguro: no sobrescribe `.env.production` ni toca los volúmenes.
+Volver a ejecutar el instalador es seguro: no toca los volúmenes de datos ni cambia de versión una instalación existente (para eso, `./deploy.sh update`).
 
-Después de entrar: cambia la contraseña de dirección, **activa la verificación en dos pasos (2FA)** en Seguridad (las operaciones críticas la piden), y configura horario, salas, personal y niños.
+Después de entrar: **activa la verificación en dos pasos (2FA)** en Seguridad (las operaciones críticas la piden) y configura horario, salas, personal y niños. El logo de Sonrisitas viene puesto por defecto; se cambia en **Marca**.
+
+### 1.1 Proxy propio con HTTPS delante (modo puerto directo)
+
+Si el servidor ya tiene Nginx (u otro proxy) con certificado, déjalo delante del 8986. Instala con el modo 1, responde **sí** a «¿proxy propio con HTTPS?», escribe la URL pública `https://…` y elige que el proxy está en este servidor (el 8986 queda en `127.0.0.1`). Eso deja en `.env.production`:
+
+```ini
+PUBLIC_MODE=http
+APP_BIND=127.0.0.1
+APP_PORT=8986
+FRONTEND_URL=https://asistencia.midominio.com
+BACKEND_URL=https://asistencia.midominio.com
+TRUST_PROXY=true
+```
+
+(Si ya instalaste sin proxy, edita esas líneas y ejecuta `./deploy.sh up`.) Ejemplo de Nginx (certificado con `certbot --nginx -d asistencia.midominio.com`):
+
+```nginx
+# En el bloque http { } de nginx.conf, si no existe ya:
+# map $http_upgrade $connection_upgrade { default upgrade; '' close; }
+
+server {
+    listen 80;
+    server_name asistencia.midominio.com;
+    return 301 https://$host$request_uri;
+}
+
+server {
+    listen 443 ssl http2;
+    server_name asistencia.midominio.com;
+
+    ssl_certificate     /etc/letsencrypt/live/asistencia.midominio.com/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/asistencia.midominio.com/privkey.pem;
+
+    # Fotos en base64 dentro de las peticiones
+    client_max_body_size 20m;
+    # Sin log de accesos: las URLs de las fotos llevan tokens (?mt=)
+    access_log off;
+
+    proxy_http_version 1.1;
+    proxy_set_header Host              $host;
+    proxy_set_header X-Real-IP         $remote_addr;
+    proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+
+    # Tiempo real (Server-Sent Events): sin buffer y con lectura larga
+    location /api/realtime/ {
+        proxy_pass http://127.0.0.1:8986;
+        proxy_buffering off;
+        proxy_cache off;
+        proxy_read_timeout 1h;
+        proxy_set_header Connection "";
+    }
+
+    # Subida de respaldos desde la app (hasta ~2 GB)
+    location = /api/system/backups/upload {
+        proxy_pass http://127.0.0.1:8986;
+        client_max_body_size 2100m;
+        proxy_request_buffering off;
+        proxy_read_timeout 30m;
+    }
+
+    location / {
+        proxy_pass http://127.0.0.1:8986;
+        proxy_set_header Upgrade    $http_upgrade;
+        proxy_set_header Connection $connection_upgrade;
+    }
+}
+```
+
+Con `X-Forwarded-Proto: https` la api envía HSTS y `upgrade-insecure-requests` sólo en esas peticiones; por `http://IP:8986` directo no los envía (si lo hiciera, la página dejaría de cargar). **Cloudflare** (proxy naranja o *Tunnel*) funciona igual: origen `http://IP:8986` (o `http://127.0.0.1:8986` con `cloudflared`), `FRONTEND_URL`/`BACKEND_URL` con la URL `https://` y `TRUST_PROXY=true`.
+
+### 1.2 Cambiar de modo después
+
+Edita `.env.production` y ejecuta `./deploy.sh up` (crea o retira Caddy según el modo):
+
+- **A HTTPS con Caddy:** `PUBLIC_MODE=https`, `SITE_ADDRESS=tu-dominio`, `FRONTEND_URL` y `BACKEND_URL` = `https://tu-dominio`, `TRUST_PROXY=true`, `APP_BIND=127.0.0.1`; abre 80/443 (`ufw allow 80/tcp && ufw allow 443/tcp`).
+- **A puerto directo:** `PUBLIC_MODE=http`, `APP_BIND=0.0.0.0`, `FRONTEND_URL` y `BACKEND_URL` = `http://IP:8986`, `TRUST_PROXY=false`.
+
+### 1.3 Firewall
+
+`ufw` **no filtra** los puertos que publica Docker (Docker inserta sus reglas antes). Por eso en modo HTTPS el 8986 se publica sólo en `127.0.0.1`, y en modo directo el 8986 queda abierto a la red aunque `ufw` no lo permita. Para restringirlo por IP usa el firewall del proveedor o la cadena `DOCKER-USER` de iptables.
 
 ### Instalación existente sin git (copiada con rsync)
 
-Ejecuta igualmente el instalador: detecta la carpeta, hace una copia `/opt/sonrisas.bak-FECHA`, la convierte en repositorio git (sin tocar `.env.production` ni los volúmenes), **vuelca la BD a `exports/pre-install-*.sql.gz`** antes de cambiar nada, cambia `DB_SYNC` a `false` y arranca la nueva versión. La primera vez, la BD existente (creada con `synchronize`) **adopta** la migración base sin re-ejecutarla.
+Ejecuta igualmente el instalador: detecta la carpeta, hace una copia `/opt/sonrisas.bak-FECHA`, la convierte en repositorio git (sin tocar `.env.production` ni los volúmenes), **vuelca la BD a `exports/pre-install-*.sql.gz`** antes de cambiar nada, cambia `DB_SYNC` a `false` y arranca la nueva versión. La primera vez, la BD existente (creada con `synchronize`) **adopta** la migración base sin re-ejecutarla. Un `.env.production` antiguo sin `PUBLIC_MODE` se trata como instalación con Caddy (`deploy.sh` añade `PUBLIC_MODE=https` y deja el 8986 sólo en `127.0.0.1`).
 
 > Si tu `.env.production` antiguo usa `DB_PASSWORD=postgres` u otra clave débil, `deploy.sh` se negará a continuar. Cámbiala primero dentro de Postgres y luego en el archivo:
 > `docker exec -it sonrisas_db psql -U <usuario> -c "ALTER USER <usuario> PASSWORD 'clave-nueva-larga'"`
@@ -70,13 +184,13 @@ Ejecuta igualmente el instalador: detecta la carpeta, hace una copia `/opt/sonri
 | `version` / `versions` | Versión instalada / versiones publicadas |
 | `history` | Historial de actualizaciones y vueltas atrás |
 | `migrations` | Migraciones de la BD aplicadas y pendientes |
-| `logs [servicio]` | Logs en vivo (`api`, `db`, `caddy`, `backup`, `updater`) |
-| `up` · `restart` · `stop` | Levantar · reiniciar · detener (no borra datos) |
-| `admin` | Crea/actualiza la cuenta de dirección (seed) |
+| `logs [servicio]` | Logs en vivo (`api`, `db`, `backup`, `updater`; `caddy` en modo HTTPS) |
+| `up` · `restart` · `stop` | Levantar (aplica cambios de `.env.production`, p. ej. el modo de acceso) · reiniciar · detener (no borra datos) |
+| `admin` | Crea la cuenta de dirección o le cambia la contraseña: pide usuario y contraseña (oculta, dos veces) y no la guarda en disco |
 | `psql` · `shell` | Consola de Postgres · shell en la api |
 | `redeploy` | Reconstruye el código actual sin cambiar de versión (con respaldo y vuelta atrás) |
 
-Opciones: `--yes` (no preguntar), `--force`.
+Opciones: `--yes` (no preguntar), `--force`. Todos los comandos leen `PUBLIC_MODE` y activan Caddy (`--profile https`) sólo en modo HTTPS; no uses `docker compose` a mano sin ese perfil en modo HTTPS.
 
 ---
 
@@ -190,7 +304,9 @@ Copia sólo archivos nuevos y nunca borra en el destino. Como alternativa mínim
 
 - **Base de datos**: nunca publicada; en una red Docker interna sin salida a internet; autenticación SCRAM; `deploy.sh` rechaza claves por defecto o de menos de 16 caracteres.
 - **Contenedores**: api y backup como usuario `node`, sistema de archivos de **sólo lectura** (+ `/tmp` en memoria), `cap_drop: ALL`, `no-new-privileges`, límites de memoria, `restart: unless-stopped`, logs rotados (10 MB × 5).
-- **Caddy**: HTTPS obligatorio, cabeceras de seguridad (HSTS, nosniff, DENY de iframes, Permissions-Policy), sin log de accesos (las URLs de fotos llevan tokens), límite de tamaño de peticiones.
+- **Caddy** (modo HTTPS): HTTPS obligatorio, cabeceras de seguridad (HSTS, nosniff, DENY de iframes, Permissions-Policy), sin log de accesos (las URLs de fotos llevan tokens), límite de tamaño de peticiones.
+- **Puerto directo** (modo HTTP): el tráfico va **sin cifrar** (contraseñas y fotos incluidas) entre el navegador y el servidor. Úsalo en una red de confianza o pon un proxy con TLS delante (§1.1). La api sólo envía HSTS y `upgrade-insecure-requests` a las peticiones que llegan por HTTPS.
+- **Cuenta de dirección**: la contraseña no se guarda en `.env.production`; `install.sh` y `./deploy.sh admin` se la pasan al contenedor por la entrada estándar.
 - **Actualizador**: tiene el socket de Docker (equivale a root), por eso no publica puertos, no comparte red con la api ni la BD, sólo acepta 3 acciones con parámetros validados (`^vX.Y.Z$`, nombre de respaldo con formato fijo) y nunca pasa texto del usuario a un shell. La api le habla sólo a través de archivos en volúmenes (`/ops/jobs` → escritura de la api; `/ops/status` → sólo lectura para la api). Para desactivarlo: `docker compose --env-file .env.production stop updater` (se puede seguir actualizando por SSH).
 - **Secretos**: `.env.production` con permisos 600, fuera de git y de la imagen. Respaldos con permisos 640 y cifrados.
 - **Operaciones críticas** desde la app (restaurar, actualizar, volver atrás, descargar o borrar respaldos): sólo dirección, con contraseña + 2FA, bloqueo tras 5 intentos fallidos en 15 min, y auditoría.
@@ -202,14 +318,18 @@ Copia sólo archivos nuevos y nunca borra en el destino. Como alternativa mínim
 | Variable | Descripción |
 |---|---|
 | `SONRISAS_DIR` | Carpeta del proyecto (`/opt/sonrisas`) |
-| `SITE_ADDRESS` | Dominio (Let's Encrypt) o IP (auto-firmado) |
-| `HTTP_PORT` / `HTTPS_PORT` | Puertos del host (80 / 443) |
+| `PUBLIC_MODE` | `http` (puerto directo, sin Caddy) o `https` (Caddy en 80/443). Sin valor = `https` (instalaciones antiguas) |
+| `APP_PORT` / `APP_BIND` | Puerto del host para la app (`8986`) y en qué interfaz: `0.0.0.0` (red) o `127.0.0.1` (sólo local, detrás de un proxy) |
+| `TRUST_PROXY` | `true` si hay un proxy delante (Caddy o el tuyo): IP real del cliente para los límites de intentos |
+| `SITE_ADDRESS` | Dominio (Let's Encrypt) o IP (auto-firmado) para Caddy; en modo http, sólo referencia |
+| `HTTP_PORT` / `HTTPS_PORT` | Puertos del host de Caddy (80 / 443) |
 | `TZ` | Zona horaria: determina qué cuenta como "hoy" y la hora del respaldo nocturno |
 | `DB_USERNAME` / `DB_PASSWORD` / `DB_NAME` | PostgreSQL. La clave sólo se lee al crear el volumen |
 | `DB_SYNC` | `false` en producción (migraciones). `deploy.sh` corrige `true` automáticamente |
 | `JWT_SECRET` / `JWT_EXPIRES_IN` | ≥ 32 caracteres. Rotarlo cierra todas las sesiones |
-| `FRONTEND_URL` / `BACKEND_URL` | `https://SITE_ADDRESS` |
-| `ADMIN_EMAIL` / `ADMIN_PASSWORD` / `ADMIN_NAME` | Cuenta de dirección inicial (seed) |
+| `FRONTEND_URL` / `BACKEND_URL` | URL pública: `http://IP:8986` (modo http) o `https://dominio`. Si empieza por `https://`, la api lo considera publicado con TLS |
+| `ADMIN_EMAIL` / `ADMIN_NAME` | Cuenta de dirección (seed). `ADMIN_PASSWORD` debe quedar **vacía**: si la rellenas a mano, se usa una vez y se borra |
+| `COMPANY_NAME` / `COMPANY_TAGLINE` | Nombre y lema iniciales del centro (`Sonrisitas` / `Centro de Desarrollo Infantil`); luego se cambian en Marca |
 | `UPLOADS_REQUIRE_AUTH` | `true`: las fotos exigen token firmado |
 | `WHATSAPP_*` | Ver secciones de WhatsApp |
 | `VAPID_*` | Notificaciones push (se generan solas en la instalación) |
@@ -252,9 +372,10 @@ No hay que tocar código: el proveedor se elige al arrancar y el resto del siste
 
 ## Problemas comunes
 
-- **No se ve la web / `ERR_SSL_PROTOCOL_ERROR`:** suele ser Caddy aún negociando el certificado o un problema de puertos. Mira `docker compose --env-file .env.production logs caddy` — debe decir `certificate obtained successfully`. Si dice errores de challenge: el dominio no resuelve aún a la IP del servidor, o los puertos 80/443 no están abiertos. Espera la propagación DNS y reintenta `./deploy.sh restart`.
+- **Modo puerto directo: no carga `http://IP:8986`:** comprueba `./deploy.sh status` (la api debe mostrar `0.0.0.0:8986->3000/tcp`), que `curl -s http://127.0.0.1:8986/api/health` responda en el servidor y que el firewall del proveedor permita el 8986/tcp. Si el navegador salta solo a `https://IP:8986`, es una caché de HSTS de una prueba anterior con HTTPS: bórrala en `chrome://net-internals/#hsts` (o prueba en ventana privada).
+- **No se ve la web / `ERR_SSL_PROTOCOL_ERROR` (modo HTTPS):** suele ser Caddy aún negociando el certificado o un problema de puertos. Mira `./deploy.sh logs caddy` — debe decir `certificate obtained successfully`. Si dice errores de challenge: el dominio no resuelve aún a la IP del servidor, o los puertos 80/443 no están abiertos. Espera la propagación DNS y reintenta `./deploy.sh restart`.
 - **`docker compose ps` no muestra `sonrisas_caddy` con `0.0.0.0:80->80/tcp`:** revisa que `HTTP_PORT` y `HTTPS_PORT` no estén vacíos, y que nada más use esos puertos (`ss -tlnp | grep -E ':80|:443'`).
-- **La cámara no abre:** entra por `https://` (no `http://`) y concede el permiso de cámara al sitio.
+- **La cámara no abre:** el navegador sólo la permite con `https://` (o en `localhost`). En modo puerto directo pon un proxy con TLS delante (§1.1) o cambia al modo HTTPS (§1.2); después concede el permiso de cámara al sitio.
 - **Las fotos no se ven (403 en `/uploads/...`):** el frontend desplegado no está enviando el token de medios. Actualiza o reconstruye (`./deploy.sh update` / `./deploy.sh redeploy`), o cierra sesión y vuelve a entrar para recibir un token nuevo.
 - **"Ningún representante de este niño tiene teléfono":** el reporte no se puede enviar hasta que al menos un representante tenga número y la casilla *«recibe reporte»* marcada. Se configura en la ficha del niño → Representantes.
 - **El WhatsApp vinculado aparece "Desvinculado" o "Sin conexión":** si se cerró desde el teléfono (o pasó mucho tiempo apagado) hay que volver a escanear el QR en **Panel → WhatsApp**. Para ver más detalle: `WHATSAPP_LOG_LEVEL=warn` y `docker compose --env-file .env.production logs api`.
@@ -262,7 +383,7 @@ No hay que tocar código: el proveedor se elige al arrancar y el resto del siste
 - **Una educadora dice que su cuenta está bloqueada:** son 5 intentos fallidos; se desbloquea sola en 15 minutos, o la dirección puede forzarlo desde **Personal** (botón del candado) o con `POST /api/staff/:id/unlock`.
 - **Los reportes salen con el día equivocado:** revisa `TZ` en `.env.production`. Ver la nota del paso 3.
 - **Cambiaste `DB_PASSWORD` y la api no conecta:** Postgres sólo lee la clave al crear su volumen. Vuelve a la clave anterior en `.env.production`, entra con `./deploy.sh psql`, ejecuta `ALTER USER <usuario> PASSWORD 'nueva';` y luego pon la nueva en el archivo y `./deploy.sh restart`. **Nunca** borres el volumen para "arreglarlo".
-- **Olvidaste la contraseña de dirección:** cambia `ADMIN_PASSWORD` (con otro `ADMIN_EMAIL`) en `.env.production` y `./deploy.sh admin`, o entra al contenedor de la BD y edita la tabla `users`.
+- **Olvidaste la contraseña de dirección:** `cd /opt/sonrisas && ./deploy.sh admin`, escribe el correo de la cuenta y una contraseña nueva (se cierran sus sesiones; la 2FA se conserva). Con otro correo, crea una cuenta de dirección nueva.
 - **La actualización falló y volvió sola atrás:** el sistema sigue en la versión anterior con los datos intactos. Mira el motivo en Ajustes → Actualizaciones (log de la tarea) o `./deploy.sh history` y `./deploy.sh logs api`.
 - **"Hay archivos del proyecto modificados a mano":** alguien editó archivos en `/opt/sonrisas`. Revisa `git status`; guarda los cambios (`git stash`) o descártalos (`git checkout -- <archivo>`) y reintenta.
 - **"El actualizador no está en línea":** `./deploy.sh logs updater`. Suele ser `SONRISAS_DIR` mal configurado en `.env.production`. Reconstrúyelo: `docker compose --env-file .env.production up -d --build updater`.

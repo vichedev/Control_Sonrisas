@@ -5,7 +5,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import helmet from 'helmet';
 import compression from 'compression';
-import { json, urlencoded } from 'express';
+import { json, urlencoded, NextFunction, Request, Response } from 'express';
 import { AppModule } from './app.module';
 import { MediaAccessService } from './uploads/media-access.service';
 
@@ -29,45 +29,74 @@ async function bootstrap() {
   app.use(json({ limit: '16mb' }));
   app.use(urlencoded({ extended: true, limit: '16mb' }));
 
+  // HTTPS vs HTTP plano. Las cabeceras que obligan a usar HTTPS (HSTS y la directiva
+  // CSP `upgrade-insecure-requests`) se envían SÓLO en peticiones que llegaron por
+  // HTTPS: directamente (req.secure) o a través de un proxy con TLS (Caddy, Nginx,
+  // Cloudflare…) que pone `X-Forwarded-Proto: https`. En el modo "puerto directo"
+  // (http://IP:8986) no se envían: el navegador intentaría https://IP:8986, que no
+  // existe, y la app no cargaría. Falsear la cabecera sólo afecta a la respuesta de
+  // quien la falsea.
+  const isSecureRequest = (req: Request): boolean =>
+    req.secure ||
+    String(req.headers['x-forwarded-proto'] || '')
+      .split(',')[0]
+      .trim()
+      .toLowerCase() === 'https';
+
+  const publicMode = (config.get<string>('PUBLIC_MODE') || '').trim().toLowerCase();
+  const publicHttps =
+    publicMode === 'https' ||
+    (config.get<string>('FRONTEND_URL') || '')
+      .split(',')
+      .some((u) => u.trim().toLowerCase().startsWith('https://'));
+  if (!publicHttps && process.env.NODE_ENV === 'production') {
+    logger.warn(
+      'Publicado por HTTP sin TLS: la cámara del navegador y la instalación como app (PWA) necesitan HTTPS. Pon un proxy con certificado delante (ver DEPLOY.md).',
+    );
+  }
+
   // Seguridad: cabeceras HTTP
   //  · contentSecurityPolicy: se envía por CABECERA (además del <meta> del front).
   //    El <meta> se puede perder si alguien sirve el HTML de otra forma; la
-  //    cabecera no. Las directivas son las mismas que las del index.html.
+  //    cabecera no. `upgrade-insecure-requests` sólo va aquí y sólo con HTTPS.
   //  · crossOriginResourcePolicy: cross-origin — fotos en /uploads necesitan poder
   //    cargarse desde el frontend (otro origen permitido).
   //  · crossOriginEmbedderPolicy: false — evita romper iframes / 3rd-party assets.
-  //  · hsts: forzar HTTPS por 6 meses con preload (proteger contra downgrade attacks
-  //    cuando hay un proxy TLS delante como Caddy).
+  //  · hsts: forzar HTTPS por 6 meses con preload (sólo en peticiones HTTPS; con
+  //    HTTP plano dejaría el sitio inaccesible).
+  //  · COOP sólo tiene efecto en orígenes seguros (en HTTP el navegador avisa).
   //  · noSniff y frameguard vienen on por defecto en helmet, no hace falta tocarlos.
-  app.use(
-    helmet({
-      contentSecurityPolicy: {
-        useDefaults: false,
-        directives: {
-          'default-src': ["'self'"],
-          'script-src': ["'self'"],
-          'style-src': ["'self'", "'unsafe-inline'"],
-          'img-src': ["'self'", 'data:', 'blob:'],
-          'font-src': ["'self'", 'data:'],
-          'connect-src': ["'self'"],
-          'worker-src': ["'self'", 'blob:'],
-          'manifest-src': ["'self'"],
-          'object-src': ["'none'"],
-          'base-uri': ["'self'"],
-          'form-action': ["'self'"],
-          'frame-ancestors': ["'none'"],
-          'upgrade-insecure-requests': [],
-        },
-      },
+  const securityHeaders = (secure: boolean) => {
+    const directives: Record<string, string[]> = {
+      'default-src': ["'self'"],
+      'script-src': ["'self'"],
+      'style-src': ["'self'", "'unsafe-inline'"],
+      'img-src': ["'self'", 'data:', 'blob:'],
+      'font-src': ["'self'", 'data:'],
+      'connect-src': ["'self'"],
+      'worker-src': ["'self'", 'blob:'],
+      'manifest-src': ["'self'"],
+      'object-src': ["'none'"],
+      'base-uri': ["'self'"],
+      'form-action': ["'self'"],
+      'frame-ancestors': ["'none'"],
+    };
+    if (secure) directives['upgrade-insecure-requests'] = [];
+    return helmet({
+      contentSecurityPolicy: { useDefaults: false, directives },
       crossOriginResourcePolicy: { policy: 'cross-origin' },
       crossOriginEmbedderPolicy: false,
-      hsts: {
-        maxAge: 60 * 60 * 24 * 180, // 180 días
-        includeSubDomains: true,
-        preload: true,
-      },
+      crossOriginOpenerPolicy: secure ? { policy: 'same-origin' } : false,
+      hsts: secure
+        ? { maxAge: 60 * 60 * 24 * 180, includeSubDomains: true, preload: true } // 180 días
+        : false,
       referrerPolicy: { policy: 'strict-origin-when-cross-origin' },
-    }),
+    });
+  };
+  const helmetHttps = securityHeaders(true);
+  const helmetHttp = securityHeaders(false);
+  app.use((req: Request, res: Response, next: NextFunction) =>
+    (isSecureRequest(req) ? helmetHttps : helmetHttp)(req, res, next),
   );
 
   // Control de acceso a /uploads. Aquí viven las fotos de los NIÑOS: nunca deben ser
