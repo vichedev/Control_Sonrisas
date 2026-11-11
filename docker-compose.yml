@@ -1,0 +1,252 @@
+name: sonrisas
+
+# Topología (sólo Caddy publica puertos: 80 y 443):
+#   caddy    → reverse proxy con TLS (Let's Encrypt con dominio; auto-firmado con IP)
+#   api      → NestJS (API /api/* + SPA). Migraciones al arrancar; respaldos desde la app
+#   db       → PostgreSQL 16 (red interna SIN salida a internet, nunca publicado)
+#   backup   → respaldo nocturno (misma imagen que la api = mismo formato)
+#   updater  → aplica actualizaciones / vuelta atrás / restauraciones pedidas desde la app.
+#              Sin puertos; habla con la api sólo por archivos en volúmenes.
+#
+# Usa SIEMPRE ./deploy.sh (lee .env.production). No ejecutes `docker compose down -v`:
+# borra la base de datos y las fotos.
+
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "5"
+
+x-db-env: &db-env
+  TZ: ${TZ:-America/Guayaquil}
+  DB_HOST: db
+  DB_PORT: 5432
+  DB_USERNAME: ${DB_USERNAME:-postgres}
+  DB_PASSWORD: ${DB_PASSWORD:?Falta DB_PASSWORD en .env.production}
+  DB_NAME: ${DB_NAME:-sonrisas}
+
+x-backup-env: &backup-env
+  BACKUP_DIR: /backups
+  BACKUP_ENCRYPTION_KEY: ${BACKUP_ENCRYPTION_KEY:-}
+  BACKUP_KEEP_DAILY: ${BACKUP_KEEP_DAILY:-14}
+  BACKUP_KEEP_SAFETY: ${BACKUP_KEEP_SAFETY:-10}
+  BACKUP_MAX_MANUAL: ${BACKUP_MAX_MANUAL:-30}
+  BACKUP_CRON: ${BACKUP_CRON:-15 3 * * *}
+
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: sonrisas_db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${DB_USERNAME:-postgres}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:?Falta DB_PASSWORD en .env.production}
+      POSTGRES_DB: ${DB_NAME:-sonrisas}
+      # Sólo afecta a un volumen NUEVO: autenticación por contraseña SCRAM también en local.
+      POSTGRES_INITDB_ARGS: "--auth=scram-sha-256"
+      TZ: ${TZ:-America/Guayaquil}
+    volumes:
+      - sonrisas_db_data:/var/lib/postgresql/data
+    networks: [backend]
+    shm_size: 256mb
+    security_opt: ["no-new-privileges:true"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$$POSTGRES_USER\" -d \"$$POSTGRES_DB\""]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+    deploy:
+      resources:
+        limits:
+          memory: ${DB_MEM_LIMIT:-1g}
+    logging: *logging
+    # NUNCA publiques el puerto 5432. Para entrar: ./deploy.sh psql
+
+  api:
+    image: sonrisas-api:current
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        APP_VERSION: ${APP_VERSION:-}
+        APP_COMMIT: ${APP_COMMIT:-}
+        APP_BUILT_AT: ${APP_BUILT_AT:-}
+    pull_policy: never
+    container_name: sonrisas_api
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      <<: [*db-env, *backup-env]
+      NODE_ENV: production
+      PORT: 3000
+      # Producción: migraciones, NUNCA synchronize (puede borrar columnas).
+      DB_SYNC: ${DB_SYNC:-false}
+      JWT_SECRET: ${JWT_SECRET:?Falta JWT_SECRET en .env.production}
+      JWT_EXPIRES_IN: ${JWT_EXPIRES_IN:-7d}
+      # Las fotos de /uploads son fotos de niños: exigen token firmado.
+      UPLOADS_REQUIRE_AUTH: ${UPLOADS_REQUIRE_AUTH:-true}
+      FRONTEND_URL: ${FRONTEND_URL}
+      BACKEND_URL: ${BACKEND_URL}
+      TRUST_PROXY: "true"
+      ADMIN_EMAIL: ${ADMIN_EMAIL}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD}
+      ADMIN_NAME: ${ADMIN_NAME:-Dirección}
+      # WhatsApp: 'manual' genera enlaces wa.me; 'linked' envía desde el número del centro
+      # vinculado por QR (en manual también se usa si está conectado); 'cloud' = API de Meta.
+      WHATSAPP_PROVIDER: ${WHATSAPP_PROVIDER:-linked}
+      WHATSAPP_SESSION_DIR: /app/.wa-auth
+      WHATSAPP_LOG_LEVEL: ${WHATSAPP_LOG_LEVEL:-silent}
+      WHATSAPP_COUNTRY_CODE: ${WHATSAPP_COUNTRY_CODE:-593}
+      WHATSAPP_PHONE_NUMBER_ID: ${WHATSAPP_PHONE_NUMBER_ID:-}
+      WHATSAPP_TOKEN: ${WHATSAPP_TOKEN:-}
+      WHATSAPP_API_VERSION: ${WHATSAPP_API_VERSION:-v21.0}
+      WHATSAPP_TEMPLATE_NAME: ${WHATSAPP_TEMPLATE_NAME:-}
+      WHATSAPP_TEMPLATE_LANG: ${WHATSAPP_TEMPLATE_LANG:-es}
+      VAPID_PUBLIC_KEY: ${VAPID_PUBLIC_KEY:-}
+      VAPID_PRIVATE_KEY: ${VAPID_PRIVATE_KEY:-}
+      VAPID_SUBJECT: ${VAPID_SUBJECT:-mailto:admin@example.com}
+      COMPANY_NAME: ${COMPANY_NAME:-Sonrisas}
+      COMPANY_TAGLINE: ${COMPANY_TAGLINE:-Control y seguimiento infantil}
+      # Respaldos y actualizador
+      BACKUP_UPLOAD_MAX_MB: ${BACKUP_UPLOAD_MAX_MB:-2048}
+      OPS_JOBS_DIR: /ops/jobs
+      OPS_STATUS_DIR: /ops/status
+      OPS_INPROCESS_RESTORE: ${OPS_INPROCESS_RESTORE:-false}
+    volumes:
+      - sonrisas_uploads:/app/uploads
+      - sonrisas_wa_auth:/app/.wa-auth
+      - sonrisas_backups:/backups
+      - sonrisas_ops_jobs:/ops/jobs
+      - sonrisas_ops_status:/ops/status:ro
+    networks: [backend, edge]
+    expose:
+      - "3000"
+    read_only: true
+    tmpfs:
+      - /tmp:size=512m
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 40s
+    deploy:
+      resources:
+        limits:
+          memory: ${API_MEM_LIMIT:-1g}
+    logging: *logging
+
+  backup:
+    image: sonrisas-api:current
+    pull_policy: never
+    container_name: sonrisas_backup
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    command: ["node", "dist/ops/cli.js", "scheduler"]
+    environment:
+      <<: [*db-env, *backup-env]
+      NODE_ENV: production
+    volumes:
+      - sonrisas_backups:/backups
+      # Las fotos también se respaldan (la BD sólo guarda su ruta). Sólo lectura.
+      - sonrisas_uploads:/app/uploads:ro
+    networks: [backend]
+    read_only: true
+    tmpfs:
+      - /tmp:size=256m
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    healthcheck:
+      disable: true
+    deploy:
+      resources:
+        limits:
+          memory: ${BACKUP_MEM_LIMIT:-512m}
+    logging: *logging
+
+  caddy:
+    image: caddy:2-alpine
+    container_name: sonrisas_caddy
+    restart: unless-stopped
+    depends_on:
+      api:
+        condition: service_healthy
+    ports:
+      - "${HTTP_PORT:-80}:80"
+      - "${HTTPS_PORT:-443}:443"
+    environment:
+      SITE_ADDRESS: ${SITE_ADDRESS:?Falta SITE_ADDRESS en .env.production}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - sonrisas_caddy_data:/data
+      - sonrisas_caddy_config:/config
+    networks: [edge]
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop: [ALL]
+    cap_add: [NET_BIND_SERVICE]
+    security_opt: ["no-new-privileges:true"]
+    deploy:
+      resources:
+        limits:
+          memory: 256m
+    logging: *logging
+
+  updater:
+    build:
+      context: ./ops/updater
+    image: sonrisas-updater:local
+    pull_policy: never
+    container_name: sonrisas_updater
+    restart: unless-stopped
+    environment:
+      TZ: ${TZ:-America/Guayaquil}
+      SONRISAS_DIR: ${SONRISAS_DIR:-/opt/sonrisas}
+      UPDATER_POLL_SECONDS: ${UPDATER_POLL_SECONDS:-5}
+      UPDATER_FETCH_MINUTES: ${UPDATER_FETCH_MINUTES:-30}
+    volumes:
+      # El socket de Docker equivale a root en el servidor: este contenedor no expone
+      # puertos, no comparte red con la api ni la BD y sólo ejecuta acciones de una lista
+      # blanca (ver ops/updater/updater.sh).
+      - /var/run/docker.sock:/var/run/docker.sock
+      # El proyecto se monta en la MISMA ruta que en el servidor (docker compose resuelve
+      # las rutas relativas del host).
+      - ${SONRISAS_DIR:-/opt/sonrisas}:${SONRISAS_DIR:-/opt/sonrisas}
+      - sonrisas_ops_jobs:/ops/jobs
+      - sonrisas_ops_status:/ops/status
+    working_dir: ${SONRISAS_DIR:-/opt/sonrisas}
+    networks: [updater]
+    security_opt: ["no-new-privileges:true"]
+    deploy:
+      resources:
+        limits:
+          memory: 512m
+    logging: *logging
+
+networks:
+  # Interna: db, api y backup. Sin salida a internet.
+  backend:
+    internal: true
+  # Caddy ↔ api, y salida a internet de la api (WhatsApp, push, Let's Encrypt).
+  edge: {}
+  # Sólo el actualizador (git fetch a GitHub).
+  updater: {}
+
+volumes:
+  sonrisas_db_data:
+  sonrisas_uploads:
+  sonrisas_caddy_data:
+  sonrisas_caddy_config:
+  sonrisas_backups:
+  # Sesión del WhatsApp vinculado: equivale a tener el teléfono abierto. No compartir.
+  sonrisas_wa_auth:
+  # Tareas del actualizador (la api escribe) y su estado/log (la api sólo lee).
+  sonrisas_ops_jobs:
+  sonrisas_ops_status:

@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="es">
+  <head>
+    <meta charset="UTF-8" />
+    <!--
+      Content Security Policy — defensa en profundidad contra XSS, inyección y exfiltración.
+
+       · default-src 'self'    : todo desde el mismo origen por defecto.
+       · script-src 'self'     : sólo JS bundleado por Vite. NO permite inline ni eval.
+       · style-src 'self' 'unsafe-inline' : Tailwind v4 + estilos en línea de React necesitan inline.
+       · img-src                : self + data:/blob: (canvas y cámara). Las fotos de /uploads son
+                                  del mismo origen en despliegue, así que no hace falta abrir más.
+       · connect-src 'self'    : todas las llamadas API van al mismo dominio (Caddy + Nest).
+       · worker-src self+blob: : service worker + workers que Vite/React puedan inicializar.
+       · object-src 'none'     : nada de <object>/<embed>/<applet>.
+       · base-uri 'self'       : bloquea inyección de <base> que cambiaría las URLs relativas.
+       · form-action 'self'    : <form action="..."> no puede apuntar a otro origen.
+       · frame-ancestors 'none': impide cargar la app dentro de un iframe externo (anti-clickjacking).
+                                 Nota: en <meta> algunos navegadores lo ignoran — el header
+                                 X-Frame-Options de Helmet cubre el caso.
+       · upgrade-insecure-requests : fuerza https en cualquier subrecurso http:// olvidado.
+    -->
+    <meta http-equiv="Content-Security-Policy" content="
+      default-src 'self';
+      script-src 'self';
+      style-src 'self' 'unsafe-inline';
+      img-src 'self' data: blob:;
+      font-src 'self' data:;
+      connect-src 'self';
+      worker-src 'self' blob:;
+      manifest-src 'self';
+      object-src 'none';
+      base-uri 'self';
+      form-action 'self';
+      frame-ancestors 'none';
+      upgrade-insecure-requests
+    " />
+    <!-- Favicon dinámico: el backend devuelve el logo del centro si lo hay, o el por defecto.
+         La primera petición HTML ya trae el icono correcto, sin "flash" del icono genérico. -->
+    <link rel="icon" href="/api/branding/favicon" />
+    <link rel="apple-touch-icon" href="/api/branding/favicon" />
+    <link rel="manifest" href="/manifest.webmanifest" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <meta name="theme-color" content="#fb7185" media="(prefers-color-scheme: light)" />
+    <meta name="theme-color" content="#0a0e1a" media="(prefers-color-scheme: dark)" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="apple-mobile-web-app-title" content="Sonrisas" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <title>Sonrisas · Control y seguimiento infantil</title>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.jsx"></script>
+  </body>
+</html>

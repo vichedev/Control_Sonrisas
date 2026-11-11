@@ -1,0 +1,7 @@
+# Los scripts se ejecutan en Linux: siempre LF aunque se editen en Windows.
+*.sh       text eol=lf
+Dockerfile text eol=lf
+Caddyfile  text eol=lf
+*.yml      text eol=lf
+.env*      text eol=lf
+ops/**     text eol=lf

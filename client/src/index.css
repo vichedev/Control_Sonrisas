@@ -1,0 +1,170 @@
+@import "tailwindcss";
+
+/* Tailwind v4: definición del modo oscuro vía clase */
+@custom-variant dark (&:where(.dark, .dark *));
+
+/*
+ * Sistema visual (ver client/src/DESIGN.md).
+ * Un solo color de acento (`--accent`, por defecto azul). La marca del centro lo puede
+ * pisar desde BrandingContext. Los demás tonos del acento se derivan con color-mix.
+ */
+:root {
+  font-family: 'Inter Variable', 'Inter', ui-sans-serif, system-ui, -apple-system,
+    BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  font-feature-settings: 'cv11', 'ss01';
+  line-height: 1.5;
+  color-scheme: light;
+
+  /* Acento */
+  --accent: #2563eb;
+  --accent-fg: #ffffff;
+  --accent-hover: color-mix(in oklab, var(--accent) 86%, black);
+  --accent-soft: color-mix(in oklab, var(--accent) 8%, white);
+  --accent-soft-strong: color-mix(in oklab, var(--accent) 16%, white);
+  --accent-text: color-mix(in oklab, var(--accent) 88%, black);
+  --accent-ring: color-mix(in oklab, var(--accent) 40%, transparent);
+
+  /* Superficies y texto */
+  --bg-app: #f8fafc;
+  --bg-surface: #ffffff;
+  --bg-elevated: #ffffff;
+  --bg-muted: #f1f5f9;
+  --text-primary: #0f172a;
+  --text-secondary: #475569;
+  --text-muted: #64748b;
+  --border-subtle: #e2e8f0;
+  --border-strong: #cbd5e1;
+  --scrollbar-thumb: #cbd5e1;
+  --scrollbar-thumb-hover: #94a3b8;
+
+  /* Barra inferior móvil (ver más abajo) */
+  --bottom-nav-h: 0px;
+}
+
+html.dark {
+  color-scheme: dark;
+  --accent-hover: color-mix(in oklab, var(--accent) 82%, white);
+  --accent-soft: color-mix(in oklab, var(--accent) 16%, transparent);
+  --accent-soft-strong: color-mix(in oklab, var(--accent) 26%, transparent);
+  --accent-text: color-mix(in oklab, var(--accent) 50%, white);
+  --accent-ring: color-mix(in oklab, var(--accent) 55%, transparent);
+
+  --bg-app: #0b0d12;
+  --bg-surface: #12151c;
+  --bg-elevated: #171b23;
+  --bg-muted: rgba(255, 255, 255, 0.04);
+  --text-primary: #f1f5f9;
+  --text-secondary: rgba(241, 245, 249, 0.72);
+  --text-muted: rgba(241, 245, 249, 0.5);
+  --border-subtle: rgba(255, 255, 255, 0.08);
+  --border-strong: rgba(255, 255, 255, 0.16);
+  --scrollbar-thumb: rgba(255, 255, 255, 0.14);
+  --scrollbar-thumb-hover: rgba(255, 255, 255, 0.24);
+}
+
+/* Utilidades de Tailwind: bg-accent, text-accent, bg-accent-soft, ring-accent, bg-surface… */
+@theme inline {
+  --font-sans: 'Inter Variable', 'Inter', ui-sans-serif, system-ui, -apple-system,
+    BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  --color-accent: var(--accent);
+  --color-accent-fg: var(--accent-fg);
+  --color-accent-hover: var(--accent-hover);
+  --color-accent-soft: var(--accent-soft);
+  --color-accent-soft-strong: var(--accent-soft-strong);
+  --color-accent-text: var(--accent-text);
+  --color-accent-ring: var(--accent-ring);
+  --color-app: var(--bg-app);
+  --color-surface: var(--bg-surface);
+  --color-elevated: var(--bg-elevated);
+}
+
+html, body, #root {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  background: var(--bg-app);
+  color: var(--text-primary);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+/* Los iconos Phosphor no deben encogerse dentro de filas flex */
+svg {
+  flex-shrink: 0;
+}
+
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--scrollbar-thumb);
+  border-radius: 999px;
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--scrollbar-thumb-hover);
+  background-clip: padding-box;
+  border: 2px solid transparent;
+}
+
+/* Selección de texto */
+::selection {
+  background: color-mix(in oklab, var(--accent) 22%, transparent);
+  color: inherit;
+}
+
+/* Animaciones sobrias (entradas de modales, avisos y menús) */
+@keyframes fade-in-up {
+  from { opacity: 0; transform: translateY(6px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+.animate-fade-in-up {
+  animation: fade-in-up 0.18s ease-out both;
+}
+
+@keyframes fade-in {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+.animate-fade-in {
+  animation: fade-in 0.15s ease-out both;
+}
+
+@keyframes pop-in {
+  from { opacity: 0; transform: translateY(-4px) scale(0.99); }
+  to   { opacity: 1; transform: translateY(0) scale(1); }
+}
+.animate-pop-in {
+  animation: pop-in 0.14s ease-out both;
+}
+
+/*
+ * Barra de navegación inferior del panel (móvil/tablet < lg).
+ * `--bottom-nav-h` vale 0 salvo cuando la barra está visible: barras fijas o `sticky`
+ * (StickyActionBar, hojas inferiores…) la usan como `bottom` para no quedar tapadas.
+ */
+@media (max-width: 1023.98px) {
+  html.has-bottom-nav {
+    --bottom-nav-h: calc(4rem + env(safe-area-inset-bottom, 0px));
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .animate-fade-in-up,
+  .animate-fade-in,
+  .animate-pop-in {
+    animation: none !important;
+  }
+}

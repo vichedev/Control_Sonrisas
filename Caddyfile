@@ -1,0 +1,63 @@
+# Caddy — reverse proxy con TLS para Sonrisas.
+#
+# SITE_ADDRESS se define en .env.production:
+#   - Con un dominio apuntando al servidor:   SITE_ADDRESS=asistencia.tudominio.com
+#     -> Caddy obtiene automáticamente un certificado real de Let's Encrypt.
+#   - Servidor de pruebas con sólo IP:   SITE_ADDRESS=203.0.113.10
+#     -> Certificado AUTO-FIRMADO (CA interna de Caddy). El navegador avisará una vez.
+#        (HTTPS es obligatorio para que funcione la cámara del navegador.)
+
+{
+	admin off
+	# Sólo HTTP/1.1 y HTTP/2 (no HTTP/3): en Docker sólo publicamos TCP 80/443.
+	servers {
+		protocols h1 h2
+	}
+}
+
+# HTTP (:80) -> redirige a HTTPS
+http://{$SITE_ADDRESS} {
+	redir https://{host}{uri} permanent
+}
+
+# HTTPS (:443) — el backend NestJS sirve la SPA + /api + /uploads
+https://{$SITE_ADDRESS} {
+	# Cabeceras de seguridad (se suman a las de helmet en la api). `defer` las aplica
+	# después de recibir la respuesta del backend.
+	header {
+		defer
+		-Server
+		-X-Powered-By
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		Permissions-Policy "camera=(self), microphone=(), geolocation=(), payment=(), usb=()"
+		Cross-Origin-Opener-Policy "same-origin"
+	}
+
+	# Subida de respaldos: hasta ~2 GB. El resto de la API tiene límites propios en Nest.
+	handle /api/system/backups/upload {
+		request_body {
+			max_size 2100MB
+		}
+		reverse_proxy api:3000
+	}
+
+	# Tiempo real (Server-Sent Events): sin compresión y sin buffer, cada evento
+	# se reenvía al navegador en cuanto llega del backend. Va ANTES del handle general.
+	handle /api/realtime/* {
+		reverse_proxy api:3000 {
+			flush_interval -1
+		}
+	}
+
+	handle {
+		request_body {
+			max_size 32MB
+		}
+		encode gzip zstd
+		reverse_proxy api:3000
+	}
+
+	# Sin log de accesos a propósito: las URLs llevan tokens de fotos (?mt=) y de descarga.
+}
