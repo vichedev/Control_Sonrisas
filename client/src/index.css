@@ -161,10 +161,30 @@ svg {
   }
 }
 
+/* Login: tarjetas que flotan suavemente sobre el panel de marca. */
+@keyframes float-soft {
+  0%,
+  100% {
+    transform: translateY(0);
+  }
+  50% {
+    transform: translateY(-8px);
+  }
+}
+.animate-float {
+  animation: float-soft 6s ease-in-out infinite;
+}
+.animate-float-slow {
+  animation: float-soft 8s ease-in-out infinite;
+  animation-delay: -2s;
+}
+
 @media (prefers-reduced-motion: reduce) {
   .animate-fade-in-up,
   .animate-fade-in,
-  .animate-pop-in {
+  .animate-pop-in,
+  .animate-float,
+  .animate-float-slow {
     animation: none !important;
   }
 }

@@ -116,7 +116,7 @@ function BrandingForm({ branding, reload }) {
               <button type="button" onClick={() => fileRef.current?.click()} className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-white hover:bg-slate-50 border border-slate-200 shadow-xs dark:bg-white/5 dark:hover:bg-white/10 dark:border-white/10 text-slate-700 dark:text-white/80 text-xs font-medium transition">
                 <Upload className="w-3.5 h-3.5" /> Subir logo
               </button>
-              {branding.logoUrl && !logoPreview && (
+              {branding.logoUrl && !branding.logoIsDefault && !logoPreview && (
                 <button type="button" onClick={() => setRemoveLogo((r) => !r)} className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium transition ${removeLogo ? 'bg-red-50 text-red-700 border border-red-200 dark:bg-red-500/10 dark:text-red-300 dark:border-red-500/20' : 'bg-white border border-slate-200 shadow-xs hover:bg-red-50 hover:text-red-700 dark:bg-white/5 dark:border-white/10 dark:hover:bg-red-500/10 text-slate-700 dark:text-white/80'}`}>
                   <Trash2 className="w-3.5 h-3.5" /> {removeLogo ? 'Logo se quitará al guardar' : 'Quitar logo actual'}
                 </button>

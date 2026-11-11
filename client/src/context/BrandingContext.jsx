@@ -9,8 +9,8 @@ import { useLoadEffect } from '../api/useLoadEffect'
  * Mientras carga, devuelve los defaults para que la UI no salte.
  */
 const DEFAULTS = {
-  companyName: 'Sonrisas',
-  tagline: 'Control de asistencia con reconocimiento facial',
+  companyName: 'Sonrisitas',
+  tagline: 'Centro de Desarrollo Infantil',
   logoUrl: '',
   primaryColor: '#4f46e5',
 }

@@ -22,7 +22,7 @@ export function LogoMark({ size = 'md', className = '' }) {
       >
         {/* El logo va por el endpoint público de branding: /uploads exige token
             y el login se muestra sin sesión iniciada. */}
-        <img src={brandingLogoUrl(branding.logoUrl)} alt="logo" className="w-full h-full object-cover" />
+        <img src={brandingLogoUrl(branding.logoUrl)} alt="logo" className="w-full h-full object-contain" />
       </div>
     )
   }
